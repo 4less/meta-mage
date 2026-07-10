@@ -1,0 +1,12 @@
+# Nextflow runtime
+work/
+.nextflow/
+.nextflow.log*
+
+# Pipeline outputs (generated)
+results/
+results_*/
+output/
+
+# Editor
+.vscode/

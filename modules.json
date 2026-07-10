@@ -1,0 +1,32 @@
+{
+  "name": "meta-mage/markers",
+  "homePage": "",
+  "repos": {
+    "https://github.com/nf-core/modules.git": {
+      "modules": {
+        "nf-core": {
+          "mmseqs/createdb": {
+            "branch": "master",
+            "git_sha": "6d46786420b4d7bc88eba026eb389c0c5535d120",
+            "installed_by": ["modules"]
+          },
+          "mmseqs/createtsv": {
+            "branch": "master",
+            "git_sha": "6d46786420b4d7bc88eba026eb389c0c5535d120",
+            "installed_by": ["modules"]
+          },
+          "mmseqs/linclust": {
+            "branch": "master",
+            "git_sha": "6d46786420b4d7bc88eba026eb389c0c5535d120",
+            "installed_by": ["modules"]
+          },
+          "pyrodigal": {
+            "branch": "master",
+            "git_sha": "0ca6ca6c6e068635d01f979d0aed2f59c5d7cec4",
+            "installed_by": ["modules"]
+          }
+        }
+      }
+    }
+  }
+}
