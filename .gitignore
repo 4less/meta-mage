@@ -1,5 +1,6 @@
 # Nextflow runtime
 work/
+work[0-9]*/
 .nextflow/
 .nextflow.log*
 
@@ -7,6 +8,10 @@ work/
 results/
 results_*/
 output/
+
+# Python
+__pycache__/
+*.pyc
 
 # Editor
 .vscode/
