@@ -2,10 +2,14 @@
 """
 Build the genome manifest from the input samplesheet.
 
-Input samplesheet (CSV, optional header) with three columns:
-    1. accession       e.g. GCF_004353185.1_ASM435318v1_genomic
-    2. gtdb_lineage    d__..;p__..;c__..;o__..;f__..;g__..;s__..
-    3. path            path to the genome FASTA (.fna.gz)
+Input samplesheet (CSV or TSV, optional header) with three columns in any order:
+    - accession        e.g. GCF_004353185.1_ASM435318v1_genomic
+    - gtdb_lineage     d__..;p__..;c__..;o__..;f__..;g__..;s__..
+    - path             path to the genome FASTA (.fna.gz)
+
+Delimiter (tab vs comma) is auto-detected, and the three columns are identified
+by content (lineage = the `;`/`__` field, path = the path-looking field), so the
+column ORDER does not matter -- GTDB-downloader emits accession/path/lineage.
 
 Assigns each genome a compact integer index (everything downstream keys on it,
 memory-efficient at 800k scale) and splits the lineage into ranks.
@@ -44,6 +48,38 @@ def looks_like_header(row):
     return "accession" in joined or "lineage" in joined or "path" in joined
 
 
+def sniff_delimiter(path):
+    """Tab if any tab appears in the first non-empty line, else comma."""
+    with open(path, newline="") as fh:
+        for line in fh:
+            if line.strip():
+                return "\t" if "\t" in line else ","
+    return ","
+
+
+PATH_SUFFIXES = (".fna", ".fa", ".fasta", ".fna.gz", ".fa.gz", ".fasta.gz", ".gz")
+
+
+def classify_columns(fields):
+    """Map fields to (accession, lineage, path, is_rep) regardless of order.
+
+    lineage = the GTDB-lineage field (has ';' and a rank prefix like 'd__');
+    path    = the field that looks like a filesystem path;
+    is_rep  = a bare '0'/'1' flag column (GTDB-downloader's is_representative),
+              or None when the sheet has no such column;
+    accession = whatever remains. Returns None if a required column is missing.
+    """
+    li = next((i for i, f in enumerate(fields) if ";" in f and "__" in f), None)
+    pi = next((i for i, f in enumerate(fields)
+               if i != li and ("/" in f or f.lower().endswith(PATH_SUFFIXES))), None)
+    ri = next((i for i, f in enumerate(fields)
+               if i not in (li, pi) and f in ("0", "1")), None)
+    ai = next((i for i in range(len(fields)) if i not in (li, pi, ri)), None)
+    if None in (li, pi, ai):
+        return None
+    return fields[ai], fields[li], fields[pi], (fields[ri] if ri is not None else None)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--genome_sheet", required=True)
@@ -53,22 +89,27 @@ def main():
                          "in the input (prefilter). 1 = no filtering.")
     args = ap.parse_args()
 
+    delim = sniff_delimiter(args.genome_sheet)
     rows = []
     with open(args.genome_sheet, newline="") as fh:
-        reader = csv.reader(fh)
+        reader = csv.reader(fh, delimiter=delim)
         for i, row in enumerate(reader):
             row = [c.strip() for c in row if c.strip() != ""]
             if len(row) < 3:
                 continue
             if i == 0 and looks_like_header(row):
                 continue
-            rows.append(row[:3])
+            cols = classify_columns(row)
+            if cols is None:
+                sys.stderr.write(f"Skipping unparseable row {i}: {row}\n")
+                continue
+            rows.append(list(cols))
 
     if not rows:
         sys.exit(f"No genomes parsed from {args.genome_sheet}")
 
     # Prefilter: count genomes per species, then drop under-sampled species.
-    ranks_by_row = [parse_lineage(lineage_str) for _, lineage_str, _ in rows]
+    ranks_by_row = [parse_lineage(lineage_str) for _, lineage_str, _, _ in rows]
     species_counts = Counter(r[SPECIES_IDX] for r in ranks_by_row)
     kept = [(row, ranks) for row, ranks in zip(rows, ranks_by_row)
             if species_counts[ranks[SPECIES_IDX]] >= args.min_genomes_per_species]
@@ -92,8 +133,13 @@ def main():
 
     with open(args.out, "w") as out:
         out.write("\t".join(["idx", "genome_id", "is_rep", "path"] + RANKS) + "\n")
-        for idx, ((accession, lineage_str, path), ranks) in enumerate(kept):
-            is_rep = "1" if (".speciesrep" in path or ".speciesrep" in accession) else "0"
+        for idx, ((accession, lineage_str, path, rep_flag), ranks) in enumerate(kept):
+            # Prefer an explicit is_representative column; fall back to the
+            # '.speciesrep' path/accession convention when the sheet lacks one.
+            if rep_flag is not None:
+                is_rep = rep_flag
+            else:
+                is_rep = "1" if (".speciesrep" in path or ".speciesrep" in accession) else "0"
             manifest_row = [str(idx), accession, is_rep, os.path.abspath(path)] + ranks
             out.write("\t".join(manifest_row) + "\n")
 
