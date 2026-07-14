@@ -20,6 +20,7 @@ include { CROSSMAP       } from '../modules/local/crossmap.nf'
 include { SPECIFICITY    } from '../modules/local/specificity.nf'
 include { DIVERSITY      } from '../modules/local/diversity.nf'
 include { EMIT_DB        } from '../modules/local/emit_db.nf'
+include { REPORT         } from '../modules/local/report.nf'
 
 workflow MARKERS {
 
@@ -102,9 +103,12 @@ workflow MARKERS {
         SPECIFICITY(CROSSMAP.out.hits, CROSSMAP.out.idmap, SCORE.out.markers, EMIT_REPS.out.marker_fasta, manifest)
         markers_final = SPECIFICITY.out.markers
         fasta_final   = SPECIFICITY.out.marker_fasta
+        spec_report   = SPECIFICITY.out.report
     } else {
         markers_final = SCORE.out.markers
         fasta_final   = EMIT_REPS.out.marker_fasta
+        // No cross-map QC ran: stage a placeholder so REPORT's input is stable.
+        spec_report   = file("${projectDir}/assets/NO_FILE")
     }
 
     // 10. Within-clade nucleotide divergence per marker (augments the marker table).
@@ -112,4 +116,17 @@ workflow MARKERS {
 
     // 11. Final classifier DB: FASTA + annotated marker table.
     EMIT_DB(DIVERSITY.out.marker_table, fasta_final)
+
+    // 12. Human-readable HTML report: the pangenome->core->marker funnel per
+    //     species, why genes were removed at each QC stage, and which species
+    //     were dropped (per-genus). Reads the pipeline's own tables so the
+    //     numbers match the emitted DB.
+    REPORT(
+        manifest,
+        BUILD_MANIFEST.out.dropped,
+        COUNTS.out.counts,
+        COUNTS.out.clade_sizes,
+        SCORE.out.markers,
+        spec_report
+    )
 }

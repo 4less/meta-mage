@@ -32,6 +32,14 @@ process CROSSMAP {
     // largest in-clade genome count for the guarded ranks, or genuine off-target
     // hits get pushed out and non-specific markers slip through. At GTDB scale
     // prebuild the target DB once (mmseqs createdb) instead of per-run easy-search.
+    //
+    // Bound mmseqs RAM to the memory SLURM actually granted this task: it splits
+    // the target DB into chunks that fit the budget instead of loading it whole,
+    // so the step can't OOM-kill the node. We hand it ~85% of task.memory and
+    // keep the rest as headroom for the prefilter result set + process overhead.
+    // Scales automatically with retries (task.memory grows per attempt).
+    def split_mem = task.memory ? "${(task.memory.toGiga() * 0.85) as long}G" : ''
+    def split_arg = split_mem ? "--split-memory-limit ${split_mem}" : ''
     """
     awk 'BEGIN{n=0}
          /^>/ { n++; print "m"n"\\t"substr(\$0,2) > "query.map"; print ">m"n; next }
@@ -46,6 +54,7 @@ process CROSSMAP {
         --min-seq-id ${params.specificity_min_id} \\
         -c 0 \\
         --max-seqs ${params.specificity_max_seqs} \\
+        ${split_arg} \\
         --format-output query,target,pident,alnlen \\
         --threads ${task.cpus}
     """

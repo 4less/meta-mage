@@ -23,6 +23,7 @@ def helpMessage() {
       --max_out_prevalence     Max outside-clade prevalence      [${params.max_out_prevalence}]
       --min_clade_size         Skip clades smaller than this     [${params.min_clade_size}]
       --max_markers_per_clade  Cap markers per clade             [${params.max_markers_per_clade}]
+      --core_prevalence        "Core gene" cutoff for the report [${params.core_prevalence}]
       --linclust_min_seq_id    Protein cluster identity (loose)  [${params.linclust_min_seq_id}]
       --linclust_min_seq_id_species  Species-rank cluster id     [${params.linclust_min_seq_id_species}]
       --linclust_coverage      Protein cluster coverage          [${params.linclust_coverage}]

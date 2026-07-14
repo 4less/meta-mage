@@ -84,6 +84,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--genome_sheet", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--dropped",
+                    help="TSV report of species dropped by the prefilter "
+                         "(species, genus, n_genomes, min_required). Always "
+                         "written (header only when nothing is dropped).")
     ap.add_argument("--min_genomes_per_species", type=int, default=10,
                     help="Drop genomes whose species has fewer than N genomes "
                          "in the input (prefilter). 1 = no filtering.")
@@ -115,16 +119,28 @@ def main():
             if species_counts[ranks[SPECIES_IDX]] >= args.min_genomes_per_species]
 
     n_dropped = len(rows) - len(kept)
+    # species -> genus for every dropped (under-sampled) species, so the report
+    # can break removals down per genus.
+    GENUS_IDX = RANKS.index("genus")
+    dropped_map = {
+        r[SPECIES_IDX]: r[GENUS_IDX]
+        for r in ranks_by_row
+        if species_counts[r[SPECIES_IDX]] < args.min_genomes_per_species
+    }
+    dropped_species = sorted(dropped_map)
     if args.min_genomes_per_species > 1:
-        dropped_species = sorted(
-            {r[SPECIES_IDX] for _, r in zip(rows, ranks_by_row)
-             if species_counts[r[SPECIES_IDX]] < args.min_genomes_per_species}
-        )
         sys.stderr.write(
             f"Prefilter --min_genomes_per_species={args.min_genomes_per_species}: "
             f"dropped {n_dropped} genome(s) across {len(dropped_species)} "
             f"under-sampled species: {', '.join(dropped_species) or '-'}\n"
         )
+    # Always emit the drop report (even empty) so the downstream channel is stable.
+    if args.dropped:
+        with open(args.dropped, "w") as dr:
+            dr.write("species\tgenus\tn_genomes\tmin_required\n")
+            for sp in dropped_species:
+                dr.write(f"{sp}\t{dropped_map[sp]}\t{species_counts[sp]}"
+                         f"\t{args.min_genomes_per_species}\n")
     if not kept:
         sys.exit(
             f"No genomes left after --min_genomes_per_species="
