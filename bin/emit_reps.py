@@ -92,6 +92,11 @@ def main():
     ap.add_argument("--reps_ffn", required=True)
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--out_markers",
+                    help="filtered marker table: input markers minus those left "
+                         "with no sequence >= min_gene_len (keeps the DB consistent)")
+    ap.add_argument("--min_gene_len", type=int, default=0,
+                    help="drop marker CDS shorter than this many bp (0 = off)")
     args = ap.parse_args()
 
     idx_is_rep, idx_gid, idx_lineage = load_manifest(args.manifest)
@@ -107,6 +112,8 @@ def main():
     collect_members(args.clusters_species, "S", wanted, idx_is_rep, cluster_members)
 
     written = 0
+    short = 0
+    emitted_markers = set()   # (rank, clade, cluster) with >= 1 kept sequence
     with open(args.out, "w") as out:
         for cluster, targets in wanted.items():
             members = cluster_members.get(cluster, [])
@@ -118,11 +125,30 @@ def main():
                     seq = rep_seqs.get(member)
                     if not seq:
                         continue
+                    if args.min_gene_len and len(seq) < args.min_gene_len:
+                        short += 1
+                        continue
                     out.write(f">{rank}|{clade}|{cluster}|{idx_gid[g]}\n")
                     for i in range(0, len(seq), 80):
                         out.write(seq[i:i + 80] + "\n")
                     written += 1
-    print(f"emit_reps: wrote {written} marker sequences")
+                    emitted_markers.add((rank, clade, cluster))
+
+    # Filtered marker table: keep only markers that retained a sequence. A marker
+    # whose every rep CDS was below min_gene_len is dropped from the DB entirely.
+    dropped_markers = 0
+    if args.out_markers:
+        with open(args.markers) as fh, open(args.out_markers, "w") as mout:
+            mout.write(fh.readline())  # header
+            for line in fh:
+                f = line.rstrip("\n").split("\t")
+                if (f[0], f[1], f[2]) in emitted_markers:
+                    mout.write(line)
+                else:
+                    dropped_markers += 1
+    print(f"emit_reps: wrote {written} marker sequences "
+          f"({short} dropped < {args.min_gene_len}bp; "
+          f"{dropped_markers} markers dropped for having no long-enough sequence)")
 
 
 if __name__ == "__main__":

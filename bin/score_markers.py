@@ -3,8 +3,12 @@
 Select clade-specific markers from per-clade counts.
 
 For each (cluster, rank, clade):
-    in_prevalence  = in_count / clade_size
+    in_prevalence  = (clade_size - (score_sum - in_score)) / clade_size
     out_prevalence = (marker_total - in_count) / (N - clade_size)
+in_prevalence is completeness-weighted: present genomes count fully, each MISSING
+genome subtracts only its completeness (score_sum = sum of the clade's genome
+completeness; in_score = sum over the genomes carrying this cluster). With no
+completeness metadata every score is 1.0, so this reduces to in_count / clade_size.
 Keep markers with in_prevalence >= min_in and out_prevalence <= max_out, on
 clades of at least min_clade_size. Rank candidates per clade by
     score = in_prevalence * (1 - out_prevalence) ** score_out_exp
@@ -19,16 +23,20 @@ from collections import defaultdict
 
 
 def load_clade_sizes(path):
+    """(rank, clade) -> (size, score_sum); plus N_total. score_sum defaults to
+    size for legacy clade_sizes files that predate the completeness column."""
     sizes = {}
     n_total = None
     with open(path) as fh:
         next(fh)  # header
         for line in fh:
-            rank, clade, size = line.rstrip("\n").split("\t")
+            f = line.rstrip("\n").split("\t")
+            rank, clade, size = f[0], f[1], int(f[2])
+            score_sum = float(f[3]) if len(f) > 3 else float(size)
             if rank == "__TOTAL__":
-                n_total = int(size)
+                n_total = size
             else:
-                sizes[(rank, clade)] = int(size)
+                sizes[(rank, clade)] = (size, score_sum)
     if n_total is None:
         raise SystemExit("clade_sizes missing __TOTAL__ row")
     return sizes, n_total
@@ -54,16 +62,23 @@ def main():
     with open(args.counts) as fh:
         next(fh)  # header
         for line in fh:
-            cluster, rank, clade, in_count, marker_total = line.rstrip("\n").split("\t")
-            in_count = int(in_count)
-            marker_total = int(marker_total)
-            size = sizes.get((rank, clade))
-            if size is None or size < args.min_clade_size:
+            f = line.rstrip("\n").split("\t")
+            cluster, rank, clade = f[0], f[1], f[2]
+            in_count = int(f[3])
+            marker_total = int(f[4])
+            in_score = float(f[5]) if len(f) > 5 else float(in_count)
+            entry = sizes.get((rank, clade))
+            if entry is None or entry[0] < args.min_clade_size:
                 continue
+            size, score_sum = entry
             out_denom = n_total - size
             if out_denom <= 0:
                 continue  # clade == whole dataset: no outside, specificity undefined
-            in_prev = in_count / size
+            # Completeness-weighted: present count fully, absences discounted by
+            # each missing genome's completeness (score_sum - in_score).
+            in_prev = (size - (score_sum - in_score)) / size
+            if in_prev > 1.0:
+                in_prev = 1.0
             out_prev = (marker_total - in_count) / out_denom
             if in_prev >= args.min_in and out_prev <= args.max_out:
                 score = in_prev * (1.0 - out_prev) ** args.score_out_exp

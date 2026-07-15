@@ -21,12 +21,16 @@ include { SPECIFICITY    } from '../modules/local/specificity.nf'
 include { DIVERSITY      } from '../modules/local/diversity.nf'
 include { EMIT_DB        } from '../modules/local/emit_db.nf'
 include { REPORT         } from '../modules/local/report.nf'
-include { LOW_MARKER_MASKING; ANI_SKANI; ANI_GAP; LOW_MARKER_REPORT } from '../modules/local/low_marker_diag.nf'
+include { LOW_MARKER_MASKING; ANI_SKANI; ANI_GAP; MASKING_REPORT; LOW_MARKER_REPORT } from '../modules/local/low_marker_diag.nf'
 
 workflow MARKERS {
 
     // 1. Integer-indexed genome manifest with full lineage (single source of truth).
-    BUILD_MANIFEST(file(params.genome_sheet))
+    //    Optional GTDB metadata attaches CheckM2 completeness for the weighted
+    //    core-prevalence; NO_FILE placeholder keeps the input stable when unset.
+    gtdb_meta = params.gtdb_metadata ? file(params.gtdb_metadata)
+                                     : file("${projectDir}/assets/NO_FILE")
+    BUILD_MANIFEST(file(params.genome_sheet), gtdb_meta)
     manifest = BUILD_MANIFEST.out.manifest
 
     // 2. Per-genome channel (the big SCATTER). meta carries the integer idx.
@@ -95,14 +99,18 @@ workflow MARKERS {
         .map { meta, fna -> fna }
         .collectFile(name: 'all_cds.ffn', storeDir: "${params.outdir}/emit")
 
+    // EMIT_REPS also drops markers whose every rep CDS is < min_gene_len and emits
+    // the length-filtered marker table (markers.emitted.tsv); everything downstream
+    // uses that so the QC set, the DB, and the report all agree.
     EMIT_REPS(SCORE.out.markers, clusters_loose, clusters_species, reps_fna, manifest)
+    markers_emitted = EMIT_REPS.out.markers
 
     // 9. Nucleotide specificity guard (MetaPhlAn's final uniqueness check): align
     //    marker CDS against ALL genomes' CDS and drop markers that cross-map to
     //    an off-target clade at read-mapping identity.
     if( params.specificity ) {
         CROSSMAP(EMIT_REPS.out.marker_fasta, all_cds)
-        SPECIFICITY(CROSSMAP.out.hits, CROSSMAP.out.idmap, SCORE.out.markers, EMIT_REPS.out.marker_fasta, manifest)
+        SPECIFICITY(CROSSMAP.out.hits, CROSSMAP.out.idmap, markers_emitted, EMIT_REPS.out.marker_fasta, manifest)
         markers_final = SPECIFICITY.out.markers
         fasta_final   = SPECIFICITY.out.marker_fasta
         spec_report   = SPECIFICITY.out.report
@@ -120,6 +128,10 @@ workflow MARKERS {
                 EMIT_REPS.out.marker_fasta,
                 reps_fna
             )
+
+            // Dedicated cross-map masking report (per-marker rescue verdicts).
+            MASKING_REPORT(LOW_MARKER_MASKING.out.summary,
+                           LOW_MARKER_MASKING.out.markers)
 
             // Genera that contain at least one flagged species.
             flagged_genera = LOW_MARKER_MASKING.out.species
@@ -146,7 +158,7 @@ workflow MARKERS {
             )
         }
     } else {
-        markers_final = SCORE.out.markers
+        markers_final = markers_emitted
         fasta_final   = EMIT_REPS.out.marker_fasta
         // No cross-map QC ran: stage a placeholder so REPORT's input is stable.
         spec_report   = file("${projectDir}/assets/NO_FILE")
@@ -167,7 +179,7 @@ workflow MARKERS {
         BUILD_MANIFEST.out.dropped,
         COUNTS.out.counts,
         COUNTS.out.clade_sizes,
-        SCORE.out.markers,
+        markers_emitted,
         spec_report
     )
 }

@@ -4,6 +4,7 @@ process BUILD_MANIFEST {
 
     input:
     path genome_sheet   // accession, gtdb_lineage, path
+    path gtdb_metadata  // GTDB metadata TSV(.gz) or the NO_FILE placeholder
 
     output:
     path 'manifest.tsv',         emit: manifest
@@ -14,6 +15,7 @@ process BUILD_MANIFEST {
     build_manifest.py \\
         --genome_sheet ${genome_sheet} \\
         --min_genomes_per_species ${params.min_genomes_per_species} \\
+        --gtdb_metadata ${gtdb_metadata} \\
         --dropped dropped_species.tsv \\
         --out manifest.tsv
     """

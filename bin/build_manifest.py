@@ -25,14 +25,68 @@ Filtering here means the integer ids stay compact and no downstream stage ever
 sees the dropped genomes. The species-representative of a dropped species goes
 too. Default 1 = no filtering.
 
+Optional --gtdb_metadata (GTDB bac120/ar53 metadata TSV, .gz ok) attaches each
+genome's CheckM2 completeness/contamination. These feed the completeness-weighted
+core-prevalence downstream: a genome missing a gene subtracts only its completeness
+from the prevalence denominator, so a core gene absent merely because a MAG is
+fragmentary is not demoted. Genomes with no metadata match default to completeness
+1.0 (full weight = old behaviour).
+
 Output TSV columns:
-    idx  genome_id  is_rep  path  domain phylum class order family genus species
+    idx  genome_id  is_rep  path  domain..species  completeness  contamination
 """
 import argparse
 import csv
+import gzip
 import os
+import re
 import sys
 from collections import Counter
+
+# Assembly-accession core, e.g. GCF_004353185.1 / GCA_000273195.1, extracted from
+# whatever decoration the genome_id or GTDB accession carries.
+_ACC_RE = re.compile(r"GC[AF]_\d+\.\d+")
+
+
+def _acc_core(s):
+    m = _ACC_RE.search(s)
+    return m.group(0) if m else None
+
+
+def load_gtdb_metadata(path):
+    """accession-core -> (completeness_frac, contamination_frac).
+
+    Keyed by both the RefSeq/GenBank forms (GCF_* from `accession`, GCA_* from
+    `ncbi_genbank_assembly_accession`) so either style of genome_id resolves.
+    """
+    comp = {}
+    if not path or os.path.basename(path) == "NO_FILE" or not os.path.exists(path):
+        return comp
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt") as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        col = {n: i for i, n in enumerate(header)}
+        ci = col.get("checkm2_completeness", col.get("checkm_completeness"))
+        ki = col.get("checkm2_contamination", col.get("checkm_contamination"))
+        ai = col.get("accession")
+        gi = col.get("ncbi_genbank_assembly_accession")
+        if ci is None or ai is None:
+            sys.stderr.write(f"GTDB metadata {path}: no completeness/accession "
+                             "column found; skipping completeness join\n")
+            return comp
+        for line in fh:
+            f = line.rstrip("\n").split("\t")
+            try:
+                c = float(f[ci]) / 100.0
+                k = float(f[ki]) / 100.0 if ki is not None else 0.0
+            except (ValueError, IndexError):
+                continue
+            for field in (f[ai], f[gi] if gi is not None and gi < len(f) else ""):
+                core = _acc_core(field)
+                if core:
+                    comp[core] = (c, k)
+    sys.stderr.write(f"GTDB metadata: loaded quality for {len(comp)} accessions\n")
+    return comp
 
 RANKS = ["domain", "phylum", "class", "order", "family", "genus", "species"]
 SPECIES_IDX = RANKS.index("species")
@@ -91,7 +145,13 @@ def main():
     ap.add_argument("--min_genomes_per_species", type=int, default=10,
                     help="Drop genomes whose species has fewer than N genomes "
                          "in the input (prefilter). 1 = no filtering.")
+    ap.add_argument("--gtdb_metadata",
+                    help="GTDB metadata TSV(.gz) for CheckM2 completeness/"
+                         "contamination. Omit (or NO_FILE) to weight every "
+                         "genome as complete.")
     args = ap.parse_args()
+
+    quality = load_gtdb_metadata(args.gtdb_metadata)
 
     delim = sniff_delimiter(args.genome_sheet)
     rows = []
@@ -147,8 +207,10 @@ def main():
             f"{args.min_genomes_per_species} prefilter"
         )
 
+    n_matched = 0
     with open(args.out, "w") as out:
-        out.write("\t".join(["idx", "genome_id", "is_rep", "path"] + RANKS) + "\n")
+        out.write("\t".join(["idx", "genome_id", "is_rep", "path"] + RANKS
+                            + ["completeness", "contamination"]) + "\n")
         for idx, ((accession, lineage_str, path, rep_flag), ranks) in enumerate(kept):
             # Prefer an explicit is_representative column; fall back to the
             # '.speciesrep' path/accession convention when the sheet lacks one.
@@ -156,9 +218,17 @@ def main():
                 is_rep = rep_flag
             else:
                 is_rep = "1" if (".speciesrep" in path or ".speciesrep" in accession) else "0"
-            manifest_row = [str(idx), accession, is_rep, os.path.abspath(path)] + ranks
+            core = _acc_core(accession)
+            comp, cont = quality.get(core, (1.0, 0.0)) if core else (1.0, 0.0)
+            if quality and core in quality:
+                n_matched += 1
+            manifest_row = ([str(idx), accession, is_rep, os.path.abspath(path)]
+                            + ranks + [f"{comp:.4f}", f"{cont:.4f}"])
             out.write("\t".join(manifest_row) + "\n")
 
+    if quality:
+        sys.stderr.write(f"Completeness join: matched {n_matched}/{len(kept)} "
+                         "genomes to GTDB metadata (unmatched -> completeness 1.0)\n")
     sys.stderr.write(f"Wrote {len(kept)} genomes to {args.out}\n")
 
 

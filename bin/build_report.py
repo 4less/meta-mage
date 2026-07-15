@@ -39,17 +39,21 @@ RANKS = ["domain", "phylum", "class", "order", "family", "genus", "species"]
 
 # --------------------------------------------------------------------------- IO
 def load_manifest(path):
-    """Return (species_size, species_genus, n_total).
+    """Return (species_size, species_score_sum, species_genus, n_total).
 
-    species_size[species]  = # genomes of that species (kept after prefilter)
-    species_genus[species] = the genus the species belongs to
-    n_total                = total kept genomes (out-clade denominator base)
+    species_size[species]      = # genomes of that species (kept after prefilter)
+    species_score_sum[species] = sum of those genomes' completeness (== size when
+                                 no metadata was joined)
+    species_genus[species]     = the genus the species belongs to
+    n_total                    = total kept genomes (out-clade denominator base)
     """
     species_size = defaultdict(int)
+    species_score_sum = defaultdict(float)
     species_genus = {}
     n_total = 0
     with open(path) as fh:
         col = {n: i for i, n in enumerate(fh.readline().rstrip("\n").split("\t"))}
+        has_comp = "completeness" in col
         for line in fh:
             f = line.rstrip("\n").split("\t")
             sp = f[col["species"]]
@@ -57,8 +61,9 @@ def load_manifest(path):
             if sp == "NA":
                 continue
             species_size[sp] += 1
+            species_score_sum[sp] += float(f[col["completeness"]]) if has_comp else 1.0
             species_genus[sp] = f[col["genus"]]
-    return species_size, species_genus, n_total
+    return species_size, species_score_sum, species_genus, n_total
 
 
 def load_dropped(path):
@@ -115,12 +120,16 @@ def load_selected(path):
 
 
 # ------------------------------------------------------------------- analysis
-def build_species_funnel(counts_path, species_size, n_total, p):
+def build_species_funnel(counts_path, species_size, species_score_sum, n_total, p):
     """Stream counts.tsv (species rows) into a per-species funnel.
 
     Returns species -> counters:
         pangenome, core, non_core, specific, non_specific, below_min_in,
         clade_too_small (0/pangenome), plus the set of specific candidate keys.
+
+    in_prevalence is completeness-weighted to match SCORE: (size - (score_sum -
+    in_score)) / size, using per-species score_sum and the per-cluster in_score
+    column (both default to the unweighted counts when no metadata was joined).
     """
     funnel = defaultdict(lambda: {
         "pangenome": 0, "core": 0, "non_core": 0,
@@ -141,9 +150,11 @@ def build_species_funnel(counts_path, species_size, n_total, p):
                 continue
             in_count = int(in_count)
             marker_total = int(marker_total)
+            in_score = float(f[5]) if len(f) > 5 else float(in_count)
+            score_sum = species_score_sum.get(clade, float(size))
             fn = funnel[clade]
             fn["pangenome"] += 1
-            in_prev = in_count / size
+            in_prev = min(1.0, (size - (score_sum - in_score)) / size)
             if in_prev < p["core_prevalence"]:
                 fn["non_core"] += 1
                 continue
@@ -204,12 +215,13 @@ def main():
         "core_prevalence": args.core_prevalence,
     }
 
-    species_size, species_genus, n_total = load_manifest(args.manifest)
+    species_size, species_score_sum, species_genus, n_total = load_manifest(args.manifest)
     dropped = load_dropped(args.dropped)
     verdicts = load_specificity(args.specificity)
     selected = load_selected(args.markers)
     qc_ran = len(verdicts) > 0
-    funnel = build_species_funnel(args.counts, species_size, n_total, p)
+    funnel = build_species_funnel(args.counts, species_size, species_score_sum,
+                                  n_total, p)
 
     # ---- per-species selected / capped / final, from the actual marker tables.
     sp_selected = defaultdict(int)   # species -> # selected (post-cap) markers

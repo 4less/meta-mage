@@ -4,18 +4,24 @@ How the `markers` workflow ([workflows/markers.nf](../workflows/markers.nf)) tur
 assemblies + GTDB lineages into a nucleotide **classifier marker database**.
 
 Legend: **rounded** = process/tool · **hexagon** = filter/selector (drops or
-subsets data) · **parallelogram** = data artifact · dashed edges = the optional
-nucleotide specificity guard (`--specificity`).
+subsets data) · **parallelogram** = data artifact · **green** = published output ·
+dashed edges = the optional nucleotide specificity guard (`--specificity`).
+
+A PDF of the *actual* run DAG is emitted every run at
+`${outdir}/pipeline_info/pipeline_dag.pdf` (Nextflow + graphviz); the diagram below
+is the curated illustration.
 
 ```mermaid
 flowchart TD
     %% ---------- Inputs ----------
     IN[/"genome_sheet CSV<br/>accession, gtdb_lineage, path"/]:::data
+    GTM[/"GTDB metadata TSV (optional)<br/>checkm2_completeness"/]:::data
 
     %% ---------- Manifest ----------
     IN --> BM("BUILD_MANIFEST<br/>build_manifest.py")
-    PREF{{"prefilter: drop species with<br/>&lt; min_genomes_per_species (10)<br/>assign integer idx · split ranks"}}:::filt
-    BM --> PREF --> MAN[/"manifest.tsv<br/>idx · genome_id · is_rep · lineage"/]:::data
+    GTM --> BM
+    PREF{{"prefilter: drop species with<br/>&lt; min_genomes_per_species (10)<br/>assign idx · split ranks · join completeness"}}:::filt
+    BM --> PREF --> MAN[/"manifest.tsv<br/>idx · genome_id · is_rep · lineage · completeness"/]:::data
 
     %% ---------- Per-genome scatter ----------
     MAN -->|"splitCsv → per-genome (SCATTER)"| PYR("PYRODIGAL  -p meta<br/>gene calling")
@@ -36,12 +42,12 @@ flowchart TD
     CLU --> CNT("COUNTS<br/>LC_ALL=C sort + aggregate_counts.py")
     CLS --> CNT
     MAN --> CNT
-    CNT --> CO[/"counts.tsv<br/>cluster·rank·clade·in_count"/]:::data
-    CNT --> CS[/"clade_sizes.tsv"/]:::data
+    CNT --> CO[/"counts.tsv<br/>cluster·rank·clade·in_count·in_score"/]:::data
+    CNT --> CS[/"clade_sizes.tsv<br/>size · score_sum (Σ completeness)"/]:::data
 
     CO --> SC("SCORE<br/>score_markers.py")
     CS --> SC
-    SEL{{"select markers per (cluster,rank,clade):<br/>in-prevalence ≥ 0.90 · out-prevalence ≤ 0.02<br/>clade_size ≥ 3 · cap 200 / clade"}}:::filt
+    SEL{{"select per (cluster,rank,clade):<br/>completeness-weighted in-prev ≥ 0.80<br/>out-prev ≤ 0.02 · clade_size ≥ 3<br/>rank by in·(1-out) · cap 100 / clade"}}:::filt
     SC --> SEL --> MK[/"markers.tsv"/]:::data
 
     %% ---------- Nucleotide payload ----------
@@ -55,14 +61,17 @@ flowchart TD
     CLS --> ER
     REPS --> ER
     MAN --> ER
-    ER --> MFA[/"markers.nuc.fasta"/]:::data
+    LENF{{"drop marker CDS<br/>&lt; min_gene_len (300 bp)"}}:::filt
+    ER --> LENF
+    LENF --> MFA[/"markers.nuc.fasta"/]:::data
+    LENF --> MKE[/"markers.emitted.tsv<br/>length-filtered marker set"/]:::data
 
     %% ---------- Optional specificity guard ----------
     MFA -.-> CM("CROSSMAP<br/>mmseqs easy-search · nuc-vs-nuc (type 3)")
     ALLCDS -.-> CM
     CM -.-> HITS[/"crossmap.m8 + query.map"/]:::data
     HITS -.-> SP("SPECIFICITY<br/>specificity_guard.py")
-    MK -.-> SP
+    MKE -.-> SP
     MFA -.-> SP
     MAN -.-> SP
     SPFILT{{"drop markers cross-mapping off-target:<br/>pident ≥ specificity_min_id<br/>alnlen ≥ specificity_min_aln"}}:::filt
@@ -70,13 +79,42 @@ flowchart TD
     SPFILT -.-> SPOUT[/"markers.specific.tsv/.fasta"/]:::data
 
     %% ---------- Diversity + DB ----------
-    MK ==>|"--specificity off"| DIV
+    MKE ==>|"--specificity off"| DIV
     MFA ==>|"--specificity off"| DIV
     SPOUT --> DIV("DIVERSITY<br/>diversity.py · mash k=21")
     DIV --> MDT[/"markers.diversity.tsv"/]:::data
     MDT --> ED("EMIT_DB<br/>emit_db.py · dedup + annotate")
     MFA --> ED
     ED --> DBOUT[/"marker_db.fasta + marker_db.tsv"/]:::out
+
+    %% ---------- Report ----------
+    MAN --> RPT("REPORT<br/>build_report.py")
+    CO --> RPT
+    CS --> RPT
+    MKE --> RPT
+    SPOUT -.-> RPT
+    RPT --> RPTO[/"report.html"/]:::out
+
+    %% ---------- Low-marker diagnostics ----------
+    subgraph LMD ["low-marker diagnostics · species with &lt; low_marker_threshold (50) markers"]
+      direction TB
+      LMM("LOW_MARKER_MASKING<br/>low_marker_masking.py")
+      MSKR("MASKING_REPORT<br/>masking_report.py")
+      ASK("ANI_SKANI<br/>skani triangle (container)")
+      AG("ANI_GAP<br/>ani_gap.py")
+      LMR("LOW_MARKER_REPORT<br/>low_marker_report.py")
+      LMM --> MSKR
+      LMM --> AG
+      ASK --> AG
+      AG --> LMR
+      LMM --> LMR
+    end
+    SPOUT -.-> LMM
+    HITS -.-> LMM
+    REPS -.-> LMM
+    MAN -.-> LMM
+    MSKR --> MSKRO[/"masking_report.html"/]:::out
+    LMR --> LMRO[/"low_marker_report.html"/]:::out
 
     classDef data fill:#eef4ff,stroke:#5b7fb5,color:#12325e;
     classDef filt fill:#fff2e0,stroke:#d68a2b,color:#5e3a0f;
@@ -91,5 +129,15 @@ run over the same protein DB: a **loose** one scaffolds family-and-above, a **ti
 one owns the species rank so sister-species/paralogs stay apart. The only
 genome-scale structure held in memory is the compact `idx → lineage` map; everything
 else streams or is externally sorted (the 800k-genome-safe path).
+
+**Completeness weighting** (when `--gtdb_metadata` is set): core prevalence is
+`(N − Σ completeness of the genomes missing the gene) / N`, so a core gene absent
+only because a genome is fragmentary is not demoted. With no metadata every genome
+weighs 1.0 and this reduces to plain presence/N.
+
+**Low-marker diagnostics**: any species that ends below `low_marker_threshold`
+markers is examined for (1) whether its cross-map-dropped markers could be salvaged
+by masking, and (2) whether it has a within-vs-between ANI gap in its genus (a
+re-merge signal).
 
 See [README.md](../README.md) for the stage table and parameter reference.

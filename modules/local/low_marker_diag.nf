@@ -38,6 +38,7 @@ process LOW_MARKER_MASKING {
         --threshold ${params.low_marker_threshold} \\
         --min_id ${params.specificity_min_id} \\
         --min_aln ${params.specificity_min_aln} \\
+        --min_survivor ${params.masking_min_survivor} \\
         --outdir .
     """
 
@@ -119,6 +120,32 @@ process ANI_GAP {
     """
     printf 'focal_species\\tother_species\\tkind\\tani\\talign_frac\\n' > ani_pairs.tsv
     printf 'species\\tgenus\\tn_within\\tmin_within\\tmedian_within\\tn_between\\tnearest_species\\tmax_between\\tgap\\toverlap\\tmerge_candidate\\n' > ani_gap_summary.tsv
+    """
+}
+
+process MASKING_REPORT {
+    tag "masking_report"
+    publishDir "${params.outdir}/low_marker", mode: 'copy'
+
+    input:
+    path masking_summary
+    path masking_markers
+
+    output:
+    path 'masking_report.html', emit: report
+
+    script:
+    """
+    masking_report.py \\
+        --masking_summary ${masking_summary} \\
+        --masking_markers ${masking_markers} \\
+        --min_survivor ${params.masking_min_survivor} \\
+        --out masking_report.html
+    """
+
+    stub:
+    """
+    touch masking_report.html
     """
 }
 

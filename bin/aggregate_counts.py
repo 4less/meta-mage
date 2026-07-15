@@ -21,10 +21,18 @@ Memory model:
     cluster's set of genome indices while streaming.
 
 For each cluster we emit, per rank, one row per clade that carries it:
-    cluster  rank  clade  in_count  marker_total
-where in_count = # in-clade genomes with the marker and marker_total = total
-genomes with the marker. Out-of-clade prevalence is reconstructed downstream as
+    cluster  rank  clade  in_count  marker_total  in_score
+where in_count = # in-clade genomes with the marker, marker_total = total genomes
+with the marker, and in_score = sum of those in-clade genomes' completeness scores.
+Out-of-clade prevalence is reconstructed downstream as
 (marker_total - in_count) / (N - clade_size).
+
+clade_sizes.tsv carries, per clade, both the genome count (size) and score_sum =
+sum of completeness over the clade's genomes. The completeness-weighted core
+prevalence downstream is (size - (score_sum - in_score)) / size: present genomes
+count fully, each MISSING genome subtracts only its completeness. With no metadata
+(every completeness = 1.0) score_sum == size and in_score == in_count, so the
+weighted value collapses to the plain in_count / size.
 """
 import argparse
 import sys
@@ -35,22 +43,28 @@ SPECIES_RANK = "species"
 
 
 def load_manifest(path):
-    """idx -> (clade_at_each_rank tuple); plus clade sizes and N."""
+    """idx -> lineage tuple, idx -> completeness score; plus clade sizes/score_sums."""
     idx_lineage = {}
-    clade_size = [dict() for _ in RANKS]  # one counter dict per rank
+    idx_score = {}
+    clade_size = [dict() for _ in RANKS]        # one counter dict per rank
+    clade_score = [dict() for _ in RANKS]       # parallel sum of completeness
     n_total = 0
     with open(path) as fh:
         header = fh.readline().rstrip("\n").split("\t")
         col = {name: i for i, name in enumerate(header)}
+        has_comp = "completeness" in col
         for line in fh:
             f = line.rstrip("\n").split("\t")
             idx = int(f[col["idx"]])
             lineage = tuple(intern(f[col[r]]) for r in RANKS)
             idx_lineage[idx] = lineage
+            score = float(f[col["completeness"]]) if has_comp else 1.0
+            idx_score[idx] = score
             n_total += 1
             for ri, clade in enumerate(lineage):
                 clade_size[ri][clade] = clade_size[ri].get(clade, 0) + 1
-    return idx_lineage, clade_size, n_total
+                clade_score[ri][clade] = clade_score[ri].get(clade, 0.0) + score
+    return idx_lineage, idx_score, clade_size, clade_score, n_total
 
 
 def genome_idx_from_protein(protein_id):
@@ -58,27 +72,31 @@ def genome_idx_from_protein(protein_id):
     return int(protein_id[1:].split("_", 1)[0])
 
 
-def flush_cluster(cluster, genomes, idx_lineage, rank_indices, tag, out):
+def flush_cluster(cluster, genomes, idx_lineage, idx_score, rank_indices, tag, out):
     """genomes: set of genome idx carrying this cluster.
 
     rank_indices: which RANKS positions to emit rows for (this clustering owns
-    those ranks). tag: cluster-id namespace prefix ("L"/"S")."""
+    those ranks). tag: cluster-id namespace prefix ("L"/"S"). Emits in_score =
+    sum of present in-clade genomes' completeness alongside in_count."""
     marker_total = len(genomes)
     if marker_total == 0:
         return
     for ri in rank_indices:
         rank = RANKS[ri]
         clade_counts = {}
+        clade_scores = {}
         for g in genomes:
             clade = idx_lineage[g][ri]
             clade_counts[clade] = clade_counts.get(clade, 0) + 1
+            clade_scores[clade] = clade_scores.get(clade, 0.0) + idx_score[g]
         for clade, in_count in clade_counts.items():
             if clade == "NA":
                 continue
-            out.write(f"{tag}:{cluster}\t{rank}\t{clade}\t{in_count}\t{marker_total}\n")
+            out.write(f"{tag}:{cluster}\t{rank}\t{clade}\t{in_count}\t"
+                      f"{marker_total}\t{clade_scores[clade]:.4f}\n")
 
 
-def stream_clustering(clusters_path, idx_lineage, rank_indices, tag, out):
+def stream_clustering(clusters_path, idx_lineage, idx_score, rank_indices, tag, out):
     """Stream one sorted rep<TAB>member TSV, emitting counts for rank_indices."""
     if not rank_indices:
         return
@@ -89,7 +107,8 @@ def stream_clustering(clusters_path, idx_lineage, rank_indices, tag, out):
             rep, member = line.rstrip("\n").split("\t")[:2]
             if rep != cur:
                 if cur is not None:
-                    flush_cluster(cur, genomes, idx_lineage, rank_indices, tag, out)
+                    flush_cluster(cur, genomes, idx_lineage, idx_score,
+                                  rank_indices, tag, out)
                 cur = rep
                 genomes = set()
             try:
@@ -97,7 +116,8 @@ def stream_clustering(clusters_path, idx_lineage, rank_indices, tag, out):
             except (ValueError, IndexError):
                 sys.stderr.write(f"skip unparseable member: {member}\n")
         if cur is not None:
-            flush_cluster(cur, genomes, idx_lineage, rank_indices, tag, out)
+            flush_cluster(cur, genomes, idx_lineage, idx_score,
+                          rank_indices, tag, out)
 
 
 def main():
@@ -112,17 +132,21 @@ def main():
     ap.add_argument("--clade_sizes", required=True)
     args = ap.parse_args()
 
-    idx_lineage, clade_size, n_total = load_manifest(args.manifest)
+    idx_lineage, idx_score, clade_size, clade_score, n_total = \
+        load_manifest(args.manifest)
+    total_score = sum(clade_score[RANKS.index("domain")].values())
 
     # Clade sizes come from the manifest alone -> identical across clusterings.
+    # score_sum = sum of completeness over the clade's genomes (== size when no
+    # metadata was joined).
     with open(args.clade_sizes, "w") as cs:
-        cs.write("rank\tclade\tsize\n")
-        cs.write(f"__TOTAL__\t__ALL__\t{n_total}\n")
+        cs.write("rank\tclade\tsize\tscore_sum\n")
+        cs.write(f"__TOTAL__\t__ALL__\t{n_total}\t{total_score:.4f}\n")
         for ri, rank in enumerate(RANKS):
             for clade, size in clade_size[ri].items():
                 if clade == "NA":
                     continue
-                cs.write(f"{rank}\t{clade}\t{size}\n")
+                cs.write(f"{rank}\t{clade}\t{size}\t{clade_score[ri][clade]:.4f}\n")
 
     species_ri = RANKS.index(SPECIES_RANK)
     if args.clusters_species:
@@ -133,10 +157,11 @@ def main():
         species_ranks = []
 
     with open(args.counts, "w") as out:
-        out.write("cluster\trank\tclade\tin_count\tmarker_total\n")
-        stream_clustering(args.clusters, idx_lineage, loose_ranks, "L", out)
+        out.write("cluster\trank\tclade\tin_count\tmarker_total\tin_score\n")
+        stream_clustering(args.clusters, idx_lineage, idx_score,
+                          loose_ranks, "L", out)
         if species_ranks:
-            stream_clustering(args.clusters_species, idx_lineage,
+            stream_clustering(args.clusters_species, idx_lineage, idx_score,
                               species_ranks, "S", out)
 
 
