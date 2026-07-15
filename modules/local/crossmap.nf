@@ -2,6 +2,9 @@ process CROSSMAP {
     tag "crossmap"
     label 'process_high'
     publishDir "${params.outdir}/markers", mode: 'copy'
+    // Expensive; on shared/HPC filesystems hash inputs by path+size, not content+
+    // timestamp, so -resume doesn't spuriously re-run it after unrelated changes.
+    cache 'lenient'
 
     // Same mmseqs2 image the nf-core modules use, so no extra provisioning.
     conda "bioconda::mmseqs2=18.8cc5c"

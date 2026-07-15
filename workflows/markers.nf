@@ -20,8 +20,8 @@ include { CROSSMAP       } from '../modules/local/crossmap.nf'
 include { SPECIFICITY    } from '../modules/local/specificity.nf'
 include { DIVERSITY      } from '../modules/local/diversity.nf'
 include { EMIT_DB        } from '../modules/local/emit_db.nf'
-include { REPORT         } from '../modules/local/report.nf'
-include { LOW_MARKER_MASKING; ANI_SKANI; ANI_GAP; MASKING_REPORT; LOW_MARKER_REPORT } from '../modules/local/low_marker_diag.nf'
+include { REPORT; LEAKAGE_REPORT } from '../modules/local/report.nf'
+include { LOW_MARKER_MASKING; ANI_SKANI; ANI_GAP; MERGE_GAIN; MASKING_REPORT; LOW_MARKER_REPORT } from '../modules/local/low_marker_diag.nf'
 
 workflow MARKERS {
 
@@ -115,6 +115,9 @@ workflow MARKERS {
         fasta_final   = SPECIFICITY.out.marker_fasta
         spec_report   = SPECIFICITY.out.report
 
+        // Per-species cross-map leakage report (incoming/outgoing, dropdown focus).
+        LEAKAGE_REPORT(SPECIFICITY.out.report)
+
         // 9b. Low-marker diagnostics: for species with < low_marker_threshold final
         //     markers, ask whether their dropped markers are rescuable by masking,
         //     and whether the species has a within/between ANI gap in its genus.
@@ -141,20 +144,29 @@ workflow MARKERS {
                 .unique()
                 .collect()
 
-            // Stage only the genomes of those genera for skani.
+            // Stage only the genomes of those genera for skani. toSortedList (not
+            // collect) so the staged file order is deterministic across runs --
+            // otherwise the task hash changes every time and -resume re-runs skani.
             ani_genomes = genomes
                 .combine(flagged_genera)
                 .filter { meta, fa, genera -> genera.contains(meta.genus) }
                 .map { meta, fa, genera -> fa }
-                .collect()
+                .toSortedList()
 
             ANI_SKANI(ani_genomes)
             ANI_GAP(manifest, LOW_MARKER_MASKING.out.species, ANI_SKANI.out.sparse)
+
+            // Does merging a flagged species with its most overlapping same-genus
+            // neighbours lift it to low_marker_threshold markers? Recomputed from
+            // counts.tsv alone (no re-run) -- the metric for whether a merge pays off.
+            MERGE_GAIN(manifest, COUNTS.out.counts, LOW_MARKER_MASKING.out.species)
+
             LOW_MARKER_REPORT(
                 LOW_MARKER_MASKING.out.species,
                 LOW_MARKER_MASKING.out.summary,
                 ANI_GAP.out.pairs,
-                ANI_GAP.out.gap
+                ANI_GAP.out.gap,
+                MERGE_GAIN.out.gain
             )
         }
     } else {

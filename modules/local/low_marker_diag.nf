@@ -51,6 +51,9 @@ process LOW_MARKER_MASKING {
 process ANI_SKANI {
     tag "ani_skani"
     publishDir "${params.outdir}/low_marker", mode: 'copy'
+    // Expensive all-vs-all triangle; hash inputs by path+size (not content+
+    // timestamp) so -resume reuses it on shared/HPC filesystems.
+    cache 'lenient'
 
     // skani runs in its own image (which has NO python) -- so this process does
     // ONLY the skani call; the python aggregation is a separate process below.
@@ -123,6 +126,44 @@ process ANI_GAP {
     """
 }
 
+process MERGE_GAIN {
+    tag "merge_gain"
+    publishDir "${params.outdir}/low_marker", mode: 'copy'
+
+    // Pure stdlib-python: for every flagged species, greedily merge its most
+    // overlapping same-genus neighbours and recompute the marker set from
+    // counts.tsv alone (merging is only relabelling -- no re-run), stopping once
+    // the capped marker count reaches low_marker_threshold. Answers "would
+    // merging lift this species to the requested marker count, and by how much?".
+
+    input:
+    path manifest              // manifest.tsv
+    path counts                // counts.tsv
+    path low_marker_species    // low_marker_species.tsv (flagged column)
+
+    output:
+    path 'merge_gain.tsv', emit: gain
+
+    script:
+    """
+    merge_gain.py \\
+        --manifest ${manifest} \\
+        --counts ${counts} \\
+        --low_marker_species ${low_marker_species} \\
+        --threshold ${params.low_marker_threshold} \\
+        --min_in ${params.min_in_prevalence} \\
+        --max_out ${params.max_out_prevalence} \\
+        --min_clade_size ${params.min_clade_size} \\
+        --max_per_clade ${params.max_markers_per_clade} \\
+        --outdir .
+    """
+
+    stub:
+    """
+    printf 'species\\tgenus\\tn_genomes\\tbaseline_markers\\tmerged_markers\\tdelta\\treached_threshold\\tn_species_added\\tmerged_clade\\ttrajectory\\n' > merge_gain.tsv
+    """
+}
+
 process MASKING_REPORT {
     tag "masking_report"
     publishDir "${params.outdir}/low_marker", mode: 'copy'
@@ -158,6 +199,7 @@ process LOW_MARKER_REPORT {
     path masking_summary
     path ani_pairs
     path ani_gap_summary
+    path merge_gain
 
     output:
     path 'low_marker_report.html', emit: report
@@ -169,6 +211,7 @@ process LOW_MARKER_REPORT {
         --masking_summary ${masking_summary} \\
         --ani_pairs ${ani_pairs} \\
         --ani_gap_summary ${ani_gap_summary} \\
+        --merge_gain ${merge_gain} \\
         --threshold ${params.low_marker_threshold} \\
         --ani_threshold ${params.low_marker_ani} \\
         --out low_marker_report.html

@@ -110,6 +110,7 @@ def main():
     ap.add_argument("--masking_summary", required=True)
     ap.add_argument("--ani_pairs", required=True)
     ap.add_argument("--ani_gap_summary", required=True)
+    ap.add_argument("--merge_gain", help="merge_gain.tsv (optional)")
     ap.add_argument("--threshold", type=int, default=50)
     ap.add_argument("--ani_threshold", type=float, default=95.0)
     ap.add_argument("--out", required=True)
@@ -120,9 +121,12 @@ def main():
     gap_rows, _ = load_tsv(args.ani_gap_summary)
     pair_rows, _ = load_tsv(args.ani_pairs)
 
+    gain_rows, _ = load_tsv(args.merge_gain)
+
     flagged = [r for r in species_rows if r.get("flagged") == "yes"]
     mask = {r["species"]: r for r in mask_rows}
     gap = {r["species"]: r for r in gap_rows}
+    gain = {r["species"]: r for r in gain_rows}
 
     within = defaultdict(list)
     between = defaultdict(lambda: defaultdict(list))
@@ -138,13 +142,21 @@ def main():
     n_overlap = sum(1 for r in gap.values() if r.get("overlap") == "yes")
     tot_dropped = sum(int(mask[s]["dropped"]) for s in mask if mask[s].get("dropped"))
     tot_resc = sum(int(mask[s]["rescuable"]) for s in mask if mask[s].get("rescuable"))
+    n_merge_reach = sum(1 for r in gain.values()
+                        if r.get("reached_threshold") == "yes")
+    n_merge_gain = sum(1 for r in gain.values()
+                       if int(r.get("delta", 0) or 0) > 0)
 
-    # Sort flagged: merge candidates first, then by final markers.
+    # Sort flagged by the merge-gain verdict first (the actual marker payoff):
+    # species merging can lift to the bar, then by how many markers it adds; the
+    # ANI merge-candidate flag and final-marker count only break ties.
     def sortkey(r):
         sp = r["species"]
+        gn = gain.get(sp, {})
         g = gap.get(sp, {})
-        return (0 if g.get("merge_candidate") == "yes" else 1,
-                0 if g.get("overlap") == "yes" else 1,
+        return (0 if gn.get("reached_threshold") == "yes" else 1,
+                -int(gn.get("delta", 0) or 0),
+                0 if g.get("merge_candidate") == "yes" else 1,
                 int(r.get("final_markers", 0)))
     flagged.sort(key=sortkey)
 
@@ -157,11 +169,41 @@ def main():
         max_b = fnum(g.get("max_between", "nan"))
         merge = g.get("merge_candidate", "no") == "yes"
         overlap = g.get("overlap", "NA")
-        tag = ("<span class='badge bad'>merge candidate</span>" if merge else
-               "<span class='badge warn'>overlap</span>" if overlap == "yes" else
-               "<span class='badge ok'>clean gap</span>" if overlap == "no" else
-               "<span class='badge dim'>single genome</span>")
+        gn = gain.get(sp, {})
+        # Primary badge = the merge-gain verdict; ANI is the fallback signal.
+        if gn.get("reached_threshold") == "yes":
+            tag = (f"<span class='badge ok'>merge &rarr; "
+                   f"{esc(gn.get('merged_markers','?'))} markers</span>")
+        elif int(gn.get("delta", 0) or 0) > 0:
+            tag = (f"<span class='badge warn'>merge +"
+                   f"{esc(gn.get('delta','0'))} (short of {args.threshold})</span>")
+        elif gn:
+            tag = "<span class='badge dim'>merge no gain</span>"
+        else:
+            tag = ("<span class='badge bad'>merge candidate</span>" if merge else
+                   "<span class='badge warn'>overlap</span>" if overlap == "yes" else
+                   "<span class='badge ok'>clean gap</span>" if overlap == "no" else
+                   "<span class='badge dim'>single genome</span>")
         svg = ani_strip_svg(within.get(sp, []), between.get(sp, {}), min_w, max_b)
+        merge_line = ""
+        if gn:
+            delta = int(gn.get("delta", 0) or 0)
+            reached = gn.get("reached_threshold") == "yes"
+            added = int(gn.get("n_species_added", 0) or 0)
+            cls = "ok" if reached else ("warn" if delta > 0 else "dim")
+            verdict = (f"reaches {args.threshold}" if reached
+                       else "gains markers" if delta > 0
+                       else "no gain")
+            clade = esc((gn.get("merged_clade", "") or "").replace("s__", ""))
+            merge_line = (
+                f"<div class='merge {cls}'>Merge probe: "
+                f"<b>{esc(gn.get('baseline_markers','?'))}</b> &rarr; "
+                f"<b>{esc(gn.get('merged_markers','?'))}</b> markers "
+                f"(<b>{delta:+d}</b>) by absorbing <b>{added}</b> species "
+                f"&middot; trajectory {esc(gn.get('trajectory','') or '')} "
+                f"&middot; <b>{verdict}</b>"
+                + (f"<div class='mergeclade'>{clade}</div>" if added else "")
+                + "</div>")
         mask_line = ""
         if m.get("dropped") and int(m["dropped"]) > 0:
             mask_line = (
@@ -184,7 +226,7 @@ def main():
             f"<span class='spmeta'>{esc(r.get('genus',''))} &middot; "
             f"{esc(r.get('genomes','?'))} genomes &middot; "
             f"{esc(r.get('final_markers','?'))} final markers</span>{tag}</div>"
-            f"{mask_line}{gap_line}{svg}</div>")
+            f"{merge_line}{mask_line}{gap_line}{svg}</div>")
 
     body = "\n".join(blocks) or "<p class='note ok'>No species fell below the threshold.</p>"
 
@@ -221,6 +263,12 @@ h1 {{ font-size:23px; margin:0 0 4px; }}
 .badge.dim {{ background:var(--panel2); color:var(--dim); }}
 .mask, .gapinfo {{ font-size:12.5px; color:var(--fg); margin:3px 0; }}
 .gapinfo.dim {{ color:var(--dim); }}
+.merge {{ font-size:12.5px; margin:3px 0 5px; padding:6px 9px; border-radius:8px;
+  border-left:3px solid var(--dim); background:var(--panel2); }}
+.merge.ok {{ border-left-color:var(--ok); }}
+.merge.warn {{ border-left-color:var(--warn); }}
+.merge.dim {{ color:var(--dim); }}
+.mergeclade {{ color:var(--dim); font-size:11.5px; margin-top:3px; }}
 .note {{ color:var(--dim); }} .note.ok {{ color:var(--ok); }}
 .legend {{ color:var(--dim); font-size:12px; margin:2px 0 20px; }}
 svg {{ margin-top:8px; }}
@@ -237,8 +285,9 @@ svg {{ margin-top:8px; }}
 merge candidate = a sibling within &ge; {args.ani_threshold:.0f}% ANI</div>
 <div class="cards">
 <div class="card"><div class="val">{n_flagged}</div><div class="lbl">flagged species</div></div>
+<div class="card"><div class="val">{n_merge_reach}</div><div class="lbl">reach &ge;{args.threshold} markers by merging</div></div>
+<div class="card"><div class="val">{n_merge_gain}</div><div class="lbl">gain markers by merging</div></div>
 <div class="card"><div class="val">{n_merge}</div><div class="lbl">merge candidates (ANI)</div></div>
-<div class="card"><div class="val">{n_overlap}</div><div class="lbl">within/between overlap</div></div>
 <div class="card"><div class="val">{tot_resc}/{tot_dropped}</div><div class="lbl">dropped markers rescuable by masking</div></div>
 </div>
 <p class="legend"><span style="color:var(--accent)">&#9679;</span> within-species pairs
@@ -251,7 +300,8 @@ two species may be one taxon.</p>
     with open(args.out, "w") as fh:
         fh.write(out)
     print(f"low_marker_report: wrote {args.out} ({n_flagged} flagged, "
-          f"{n_merge} merge candidates, {tot_resc}/{tot_dropped} markers rescuable)")
+          f"{n_merge_reach} reach >={args.threshold} by merging, {n_merge_gain} gain "
+          f"markers, {n_merge} ANI merge candidates, {tot_resc}/{tot_dropped} rescuable)")
 
 
 if __name__ == "__main__":

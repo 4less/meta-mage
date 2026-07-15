@@ -38,3 +38,30 @@ process REPORT {
     touch report.html
     """
 }
+
+process LEAKAGE_REPORT {
+    tag "leakage_report"
+    publishDir "${params.outdir}/report", mode: 'copy'
+
+    // Per-species cross-map leakage summary (incoming/outgoing) from the
+    // specificity guard, with a focus-species dropdown. Self-contained HTML.
+
+    input:
+    path spec_report       // specificity_report.tsv from the cross-map guard
+
+    output:
+    path 'leakage_report.html', emit: report
+
+    script:
+    """
+    leakage_report.py \\
+        --specificity ${spec_report} \\
+        --rank species \\
+        --out leakage_report.html
+    """
+
+    stub:
+    """
+    touch leakage_report.html
+    """
+}
