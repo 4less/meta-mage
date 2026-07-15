@@ -92,6 +92,8 @@ def load_specificity(path):
         header = fh.readline()
         if not header:
             return verdicts
+        col = {n: i for i, n in enumerate(header.rstrip("\n").split("\t"))}
+        rec_i = col.get("recovered")
         for line in fh:
             f = line.rstrip("\n").split("\t")
             if len(f) < 7:
@@ -102,8 +104,27 @@ def load_specificity(path):
                 "n_offtarget": int(n_off),
                 "max_id": float(max_id),
                 "worst": worst,
+                # A marker that cross-mapped but was kept because masking left a
+                # long clean window: pass=1 AND recovered=1.
+                "recovered": rec_i is not None and rec_i < len(f)
+                and f[rec_i] == "1",
             }
     return verdicts
+
+
+def load_merge_gain(path):
+    """merge_gain.tsv rows (list of dicts) or [] when absent -- the assessment of
+    whether merging a low-marker species with its neighbours lifts its markers."""
+    if not path or os.path.basename(path) == "NO_FILE" or not os.path.exists(path):
+        return []
+    rows = []
+    with open(path) as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        for line in fh:
+            f = line.rstrip("\n").split("\t")
+            if len(f) == len(header):
+                rows.append(dict(zip(header, f)))
+    return rows
 
 
 def load_selected(path):
@@ -199,6 +220,8 @@ def main():
     ap.add_argument("--markers", required=True, help="SCORE selected markers")
     ap.add_argument("--dropped", help="dropped_species.tsv from the prefilter")
     ap.add_argument("--specificity", help="specificity_report.tsv (or NO_FILE)")
+    ap.add_argument("--merge_gain", help="merge_gain.tsv (or NO_FILE) -- merge "
+                    "assessment for low-marker species")
     ap.add_argument("--min_in", type=float, required=True)
     ap.add_argument("--max_out", type=float, required=True)
     ap.add_argument("--min_clade_size", type=int, required=True)
@@ -224,8 +247,11 @@ def main():
                                   n_total, p)
 
     # ---- per-species selected / capped / final, from the actual marker tables.
+    # sp_final = markers surviving QC, INCLUDING mask-recovered ones (pass=1); of
+    # those, sp_rescued were kept only because masking left a long clean window.
     sp_selected = defaultdict(int)   # species -> # selected (post-cap) markers
-    sp_final = defaultdict(int)      # species -> # markers surviving QC
+    sp_final = defaultdict(int)      # species -> # markers surviving QC (final)
+    sp_rescued = defaultdict(int)    # species -> # of those kept by mask recovery
     for (rank, clade, cluster) in selected:
         if rank != "species":
             continue
@@ -233,11 +259,14 @@ def main():
         v = verdicts.get((rank, clade, cluster))
         if not qc_ran or (v and v["pass"]):
             sp_final[clade] += 1
+            if v and v.get("recovered"):
+                sp_rescued[clade] += 1
 
     # ---- markers-by-rank summary (all ranks).
     rank_selected = defaultdict(int)
     rank_final = defaultdict(int)
     rank_qc_dropped = defaultdict(int)
+    rank_rescued = defaultdict(int)
     for (rank, clade, cluster) in selected:
         rank_selected[rank] += 1
         v = verdicts.get((rank, clade, cluster))
@@ -245,6 +274,8 @@ def main():
             rank_qc_dropped[rank] += 1
         else:
             rank_final[rank] += 1
+            if v and v.get("recovered"):
+                rank_rescued[rank] += 1
 
     # ---- QC removals (cross-map guard) detail, all ranks.
     qc_removed = [
@@ -276,17 +307,20 @@ def main():
     tot_specific = sum(fn["specific"] for fn in funnel.values())
     tot_selected = sum(sp_selected.values())
     tot_final = sum(sp_final.values())
+    tot_rescued = sum(sp_rescued.values())
     n_species = len(species_size)
     n_genera = len({g for g in species_genus.values() if g != "NA"})
 
+    merge_gain = load_merge_gain(args.merge_gain)
+
     html_out = render_html(
         args, p, qc_ran, n_total, n_species, n_genera,
-        species_size, species_genus, funnel, sp_selected, sp_final,
-        rank_selected, rank_final, rank_qc_dropped,
+        species_size, species_genus, funnel, sp_selected, sp_final, sp_rescued,
+        rank_selected, rank_final, rank_qc_dropped, rank_rescued,
         qc_removed, dropped, genus_species, genus_prefilter, genus_zero,
-        zero_marker_species,
+        zero_marker_species, merge_gain,
         totals=dict(pangenome=tot_pangenome, core=tot_core, specific=tot_specific,
-                    selected=tot_selected, final=tot_final),
+                    selected=tot_selected, final=tot_final, rescued=tot_rescued),
     )
     with open(args.out, "w") as fh:
         fh.write(html_out)
@@ -296,13 +330,17 @@ def main():
 
 
 def render_html(args, p, qc_ran, n_total, n_species, n_genera,
-                species_size, species_genus, funnel, sp_selected, sp_final,
-                rank_selected, rank_final, rank_qc_dropped,
+                species_size, species_genus, funnel, sp_selected, sp_final, sp_rescued,
+                rank_selected, rank_final, rank_qc_dropped, rank_rescued,
                 qc_removed, dropped, genus_species, genus_prefilter, genus_zero,
-                zero_marker_species, totals):
+                zero_marker_species, merge_gain, totals):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     # Summary cards.
+    rescued = totals.get("rescued", 0)
+    final_sub = ("QC not run" if not qc_ran else
+                 f"after cross-map QC, incl. {rescued:,} mask-rescued" if rescued
+                 else "after cross-map QC + mask recovery")
     cards = "".join([
         card("Genomes", f"{n_total:,}"),
         card("Species", f"{n_species:,}"),
@@ -311,8 +349,7 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
         card("Core genes", f"{totals['core']:,}", f">= {p['core_prevalence']:.0%} prevalence"),
         card("Specific candidates", f"{totals['specific']:,}", "pre-cap"),
         card("Selected markers", f"{totals['selected']:,}", f"cap {p['max_per_clade']}/clade"),
-        card("Final markers", f"{totals['final']:,}",
-             "after cross-map QC" if qc_ran else "QC not run"),
+        card("Final markers", f"{totals['final']:,}", final_sub),
     ])
 
     # Species funnel table.
@@ -329,9 +366,13 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
         spec = fn.get("specific", 0)
         sel = sp_selected.get(sp, 0)
         fin = sp_final.get(sp, 0)
+        resc = sp_rescued.get(sp, 0)
         capped = max(0, spec - sel)
+        # QC dropped = selected minus final; final already includes mask-rescued,
+        # so a marker that cross-mapped but was recovered is NOT counted here.
         qc_drop = max(0, sel - fin) if qc_ran else 0
         cls = " class='warn'" if fin == 0 else ""
+        resc_cell = f"<td>{resc}</td>" if qc_ran else "<td>-</td>"
         body_rows.append(
             f"<tr{cls}><td class='l'>{esc(sp)}</td>"
             f"<td class='l dim'>{esc(species_genus.get(sp, 'NA'))}</td>"
@@ -340,13 +381,57 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
             f"<td>{fn.get('non_core', 0)}</td>"
             f"<td>{spec}</td>"
             f"<td>{fn.get('non_specific', 0) + fn.get('below_min_in', 0)}</td>"
-            f"<td>{capped}</td><td>{qc_drop}</td>"
+            f"<td>{capped}</td><td>{qc_drop}</td>{resc_cell}"
             f"<td class='strong'>{fin}</td></tr>"
         )
     trunc_note = (f"<p class='note'>Showing the first {args.max_table_rows:,} of "
                   f"{len(species_rows):,} species (sorted by genus). Full per-marker "
                   f"data is in the pipeline's counts/markers TSVs.</p>"
                   if truncated else "")
+
+    # Merge assessment: for low-marker species, whether merging with the nearest
+    # neighbours (markers recomputed after all filters, masking RE-APPLIED for the
+    # merged clade) lifts the marker count, and which species it would pool.
+    merge_section = ""
+    if merge_gain:
+        mg = sorted(merge_gain,
+                    key=lambda r: (r.get("reached_threshold") != "yes",
+                                   -int(r.get("delta", 0) or 0)))
+        n_reach = sum(1 for r in mg if r.get("reached_threshold") == "yes")
+        n_help = sum(1 for r in mg if int(r.get("delta", 0) or 0) > 0)
+        mrows = []
+        for r in mg[: args.max_table_rows]:
+            reached = r.get("reached_threshold") == "yes"
+            delta = int(r.get("delta", 0) or 0)
+            added = int(r.get("n_species_added", 0) or 0)
+            merged_with = " + ".join(
+                (r.get("merged_clade", "") or "").split(" + ")[1:]) or "&mdash;"
+            badge = ("<span class='ok'>reaches target</span>" if reached
+                     else f"<span class='warn'>+{delta}</span>" if delta > 0
+                     else "<span class='dim'>no gain</span>")
+            cls = "" if delta > 0 else " class='dim'"
+            mrows.append(
+                f"<tr{cls}><td class='l'>{esc(r.get('species',''))}</td>"
+                f"<td class='l dim'>{esc(r.get('genus',''))}</td>"
+                f"<td>{esc(r.get('baseline_markers','0'))}</td>"
+                f"<td class='strong'>{esc(r.get('merged_markers','0'))}</td>"
+                f"<td>{delta:+d}</td><td>{added}</td>"
+                f"<td class='l'>{merged_with}</td>"
+                f"<td>{esc(r.get('trajectory',''))}</td><td>{badge}</td></tr>")
+        merge_section = (
+            "<h2>Merge assessment (low-marker species)</h2>"
+            "<p class='legend'>For each species that ended below the marker "
+            "threshold, the greedy merge probe recomputes markers <b>after all "
+            "filters, re-applying masking for the merged clade</b>, absorbing the "
+            "nearest same-genus neighbours until the count clears the threshold. "
+            f"<b>{n_help}</b> species gain markers by merging, <b>{n_reach}</b> reach "
+            "the threshold. Baseline = current final markers; Merged = after the "
+            "listed species are pooled.</p>"
+            "<div class='tablewrap'><table><thead><tr>"
+            "<th>Species</th><th>Genus</th><th>Final markers</th>"
+            "<th>Merged markers</th><th>&Delta;</th><th># merged</th>"
+            "<th>Merge with</th><th>Trajectory</th><th>Verdict</th></tr></thead>"
+            f"<tbody>{''.join(mrows)}</tbody></table></div>")
 
     # Markers-by-rank table.
     rank_body = []
@@ -357,6 +442,7 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
             f"<tr><td class='l'>{esc(rank)}</td>"
             f"<td>{rank_selected.get(rank, 0)}</td>"
             f"<td>{rank_qc_dropped.get(rank, 0) if qc_ran else '-'}</td>"
+            f"<td>{rank_rescued.get(rank, 0) if qc_ran else '-'}</td>"
             f"<td class='strong'>{rank_final.get(rank, 0)}</td></tr>"
         )
 
@@ -583,6 +669,10 @@ th {{ position:sticky; top:0; background:var(--panel2); color:var(--dim);
 td.l, th:first-child {{ text-align:left; }}
 td.dim {{ color:var(--dim); }}
 td.strong {{ font-weight:700; color:var(--accent); }}
+span.ok {{ color:var(--ok); font-weight:600; }}
+span.warn {{ color:var(--warn); font-weight:600; }}
+span.dim {{ color:var(--dim); }}
+tr.dim td {{ color:var(--dim); }}
 tr.warn td {{ background:color-mix(in srgb, var(--warn) 9%, transparent); }}
 tbody tr:hover td {{ background:var(--panel2); }}
 .note {{ color:var(--dim); font-size:13px; margin:8px 2px 12px; }}
@@ -616,19 +706,26 @@ th.has-tip::after {{ content:"\\00a0\\24d8"; color:var(--accent); font-size:10px
 <b>pangenome</b> &rarr; <b>core</b> (drop: below {p['core_prevalence']:.0%} in-species
 prevalence) &rarr; <b>specific</b> (drop: shared with other clades / below marker
 prevalence) &rarr; <b>selected</b> (drop: over the {p['max_per_clade']}/clade cap)
-&rarr; <b>final</b> (drop: cross-map QC). Rows in amber ended with zero markers.</p>
+&rarr; <b>final</b> (drop: cross-map QC; a cross-mapping marker is rescued when
+masking leaves a clean window). <b>Final</b> includes mask-rescued markers. Rows in
+amber ended with zero markers.</p>
 {trunc_note}
 <div class="tablewrap"><table><thead><tr>
 <th>Species</th><th>Genus</th><th data-tip="genomes">Genomes</th>
 <th data-tip="pangenome">Pangenome</th><th data-tip="core">Core</th>
 <th data-tip="not_core">Not core</th><th data-tip="specific">Specific</th>
 <th data-tip="not_specific">Not specific</th><th data-tip="capped">Capped</th>
-<th data-tip="qc_dropped">QC dropped</th><th data-tip="final">Final</th></tr></thead>
+<th data-tip="qc_dropped">QC dropped</th>
+<th data-tip="rescued">Mask-rescued</th>
+<th data-tip="final">Final (after mask rescue)</th></tr></thead>
 <tbody>{''.join(body_rows)}</tbody></table></div>
+
+{merge_section}
 
 <h2>Markers by rank</h2>
 <div class="tablewrap"><table><thead><tr><th>Rank</th>
 <th data-tip="selected">Selected</th><th data-tip="qc_dropped">QC dropped</th>
+<th data-tip="rescued">Mask-rescued</th>
 <th data-tip="final">Final</th></tr></thead>
 <tbody>{''.join(rank_body)}</tbody></table></div>
 

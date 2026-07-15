@@ -108,6 +108,8 @@ workflow MARKERS {
     // 9. Nucleotide specificity guard (MetaPhlAn's final uniqueness check): align
     //    marker CDS against ALL genomes' CDS and drop markers that cross-map to
     //    an off-target clade at read-mapping identity.
+    // Merge assessment for the final report; NO_FILE unless the low-marker stage runs.
+    merge_gain_report = file("${projectDir}/assets/NO_FILE")
     if( params.specificity ) {
         CROSSMAP(EMIT_REPS.out.marker_fasta, all_cds)
         SPECIFICITY(CROSSMAP.out.hits, CROSSMAP.out.idmap, markers_emitted, EMIT_REPS.out.marker_fasta, manifest, all_cds)
@@ -160,7 +162,8 @@ workflow MARKERS {
             // neighbours lift it to low_marker_threshold markers? Recomputed from
             // counts.tsv alone (no re-run) -- the metric for whether a merge pays off.
             MERGE_GAIN(manifest, COUNTS.out.counts, LOW_MARKER_MASKING.out.species,
-                       SPECIFICITY.out.report)
+                       SPECIFICITY.out.report, SPECIFICITY.out.mask_intervals)
+            merge_gain_report = MERGE_GAIN.out.gain
 
             LOW_MARKER_REPORT(
                 LOW_MARKER_MASKING.out.species,
@@ -193,6 +196,7 @@ workflow MARKERS {
         COUNTS.out.counts,
         COUNTS.out.clade_sizes,
         markers_emitted,
-        spec_report
+        spec_report,
+        merge_gain_report
     )
 }

@@ -166,7 +166,7 @@ def scan_hits(path, qmap, idx_lineage, min_id, min_aln, collect_targets=False):
     tell whether pooling some of those clades into the marker's clade would make it
     unique (all off-targets absorbed) or not (an off-target remains outside)."""
     offenders = {}
-    off_genes = {}
+    off_by_clade = {}      # key -> {off_target_clade: {target_gene_id}}
     with open(path) as fh:
         for line in fh:
             f = line.rstrip("\n").split("\t")
@@ -199,8 +199,9 @@ def scan_hits(path, qmap, idx_lineage, min_id, min_aln, collect_targets=False):
             clades.add(target_clade)
             offenders[key] = (n + 1, max_id, worst, clades)
             if collect_targets:
-                off_genes.setdefault(key, set()).add(target)
-    return offenders, off_genes
+                off_by_clade.setdefault(key, {}).setdefault(
+                    target_clade, set()).add(target)
+    return offenders, off_by_clade
 
 
 def marker_rep_seqs(fasta_path, wanted_keys):
@@ -224,32 +225,64 @@ def marker_rep_seqs(fasta_path, wanted_keys):
     return seqs
 
 
-def recover_markers(offenders, off_genes, args):
+def union_len(intervals):
+    return sum(e - s for s, e in intervals)
+
+
+def merge_intervals(intervals):
+    """Sort + merge overlapping [s,e) intervals."""
+    if not intervals:
+        return []
+    iv = sorted(intervals)
+    out = [list(iv[0])]
+    for s, e in iv[1:]:
+        if s <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], e)
+        else:
+            out.append([s, e])
+    return [(s, e) for s, e in out]
+
+
+def recover_markers(offenders, off_by_clade, args):
     """Which cross-mapping markers are recoverable by masking: a clean (un-cross-
     mapping) window of >= recovery_min_clean bp remains AND <= recovery_max_masked
-    fraction of the gene is masked. Returns {key: (clean_bp, masked_frac, bool)}."""
+    fraction of the gene is masked.
+
+    Returns
+      verdict: {key: (clean_bp, masked_frac, bool)}   -- recovery vs ALL off-targets
+      by_clade: {key: (gene_len, {off_clade: [(s,e),...]})}  -- per-off-target-clade
+                masked intervals, so a merge probe can re-mask against only the
+                clades that stay OUTSIDE a merged clade (merging absorbs the rest)."""
     all_targets = set()
-    for s in off_genes.values():
-        all_targets |= s
+    for cm in off_by_clade.values():
+        for gs in cm.values():
+            all_targets |= gs
     sys.stderr.write(f"[guard] mask recovery: {len(offenders)} dropped markers, "
                      f"{len(all_targets)} off-target genes; loading targets from "
                      f"{os.path.basename(args.target)}...\n")
     target_seqs = read_fasta_subset(args.target, all_targets)
     marker_seqs = marker_rep_seqs(args.fasta, set(offenders))
 
-    out = {}
+    verdict, by_clade = {}, {}
     for key in offenders:
         qseq = marker_seqs.get(key, "")
         n = len(qseq)
-        tgts = [target_seqs[t] for t in off_genes.get(key, ()) if t in target_seqs]
-        intervals = covered_positions(qseq, tgts, args.k, args.merge_gap) if n else []
-        masked_bp = sum(e - s for s, e in intervals)
-        clean = longest_clean(intervals, n) if n else 0
-        frac = (masked_bp / n) if n else 1.0
+        cmap = off_by_clade.get(key, {})
+        per_clade = {}
+        for oc, gene_ids in cmap.items():
+            tgts = [target_seqs[t] for t in gene_ids if t in target_seqs]
+            iv = covered_positions(qseq, tgts, args.k, args.merge_gap) if n else []
+            if iv:
+                per_clade[oc] = iv
+        by_clade[key] = (n, per_clade)
+        # Recovery vs ALL off-target clades = union of the per-clade intervals.
+        allmask = merge_intervals([iv for ivs in per_clade.values() for iv in ivs])
+        clean = longest_clean(allmask, n) if n else 0
+        frac = (union_len(allmask) / n) if n else 1.0
         rec = bool(n) and clean >= args.recovery_min_clean \
             and frac <= args.recovery_max_masked_frac
-        out[key] = (clean, frac, rec)
-    return out
+        verdict[key] = (clean, frac, rec)
+    return verdict, by_clade
 
 
 def main():
@@ -264,6 +297,9 @@ def main():
     ap.add_argument("--out_markers", required=True)
     ap.add_argument("--out_fasta", required=True)
     ap.add_argument("--report", required=True)
+    ap.add_argument("--out_mask_intervals",
+                    help="per-off-target-clade masked intervals (for re-masking "
+                    "after a hypothetical species merge)")
     # Mask recovery: keep a cross-mapping marker if masking the shared stretches
     # still leaves a long clean window. --target is the off-target CDS universe
     # (all_cds.ffn). Omit --target to disable recovery (legacy binary guard).
@@ -279,10 +315,24 @@ def main():
     idx_lineage = load_manifest(args.manifest)
     qmap = load_idmap(args.idmap)
     do_recover = bool(args.target)
-    offenders, off_genes = scan_hits(args.hits, qmap, idx_lineage,
-                                     args.min_id, args.min_aln,
-                                     collect_targets=do_recover)
-    recovered = recover_markers(offenders, off_genes, args) if do_recover else {}
+    offenders, off_by_clade = scan_hits(args.hits, qmap, idx_lineage,
+                                        args.min_id, args.min_aln,
+                                        collect_targets=do_recover)
+    if do_recover:
+        recovered, by_clade = recover_markers(offenders, off_by_clade, args)
+    else:
+        recovered, by_clade = {}, {}
+
+    # Per-off-target-clade masked intervals, so a merge probe can re-mask a marker
+    # against only the clades that remain OUTSIDE a merged clade.
+    if args.out_mask_intervals:
+        with open(args.out_mask_intervals, "w") as mi:
+            mi.write("rank\tclade\tcluster\tgene_len\tclade_masks\n")
+            for key, (glen, per_clade) in by_clade.items():
+                enc = "|".join(
+                    f"{oc}:" + ",".join(f"{s}-{e}" for s, e in ivs)
+                    for oc, ivs in per_clade.items() if ivs)
+                mi.write(f"{key[0]}\t{key[1]}\t{key[2]}\t{glen}\t{enc}\n")
 
     kept = dropped = rescued = 0
     survivors = set()

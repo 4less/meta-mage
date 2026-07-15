@@ -98,41 +98,132 @@ def load_counts(path, wanted_species):
 
 
 def load_guard(path):
-    """From specificity_report.tsv (species rank): the cross-map guard footprint
-    per cluster -- off_union (all off-target clades the cluster's copies hit),
-    the set of mask-recovered clusters, and the set of clusters the guard actually
-    evaluated (== emitted, length-passed). Empty/absent => guard not run."""
-    off_union = defaultdict(set)
-    recovered = set()
-    queried = set()
+    """From specificity_report.tsv (species rank), per (species, cluster):
+        queried      -- every emitted (length-passed) marker the guard evaluated
+        clean        -- markers with NO off-target (unique as-is)
+        off_clades   -- the set of off-target clades each cross-mapping marker hits
+    Empty/absent => guard not run."""
+    queried, clean = set(), set()
+    off_clades = {}
     if not path or os.path.basename(path) == "NO_FILE" or not os.path.exists(path):
-        return off_union, recovered, queried, False
+        return queried, clean, off_clades, False
     with open(path) as fh:
         head = fh.readline().rstrip("\n").split("\t")
         col = {n: i for i, n in enumerate(head)}
         if "cluster" not in col:
-            return off_union, recovered, queried, False
+            return queried, clean, off_clades, False
         oc_i = col.get("offtarget_clades")
-        rec_i = col.get("recovered")
         for line in fh:
             f = line.rstrip("\n").split("\t")
             if col.get("rank") is not None and f[col["rank"]] != "species":
                 continue
-            cl = f[col["cluster"]]
-            queried.add(cl)
-            if oc_i is not None and oc_i < len(f) and f[oc_i]:
-                off_union[cl] |= set(f[oc_i].split(";"))
-            if rec_i is not None and rec_i < len(f) and f[rec_i] == "1":
-                recovered.add(cl)
-    return off_union, recovered, queried, True
+            key = (f[col["clade"]], f[col["cluster"]])
+            queried.add(key)
+            oc = f[oc_i] if (oc_i is not None and oc_i < len(f)) else ""
+            if oc:
+                off_clades[key] = set(oc.split(";"))
+            else:
+                clean.add(key)
+    return queried, clean, off_clades, True
 
 
-def marker_set(clade_species, per, total, size, score, n_total, p, guard):
+def load_mask_intervals(path):
+    """per (species, cluster) -> (gene_len, {off_clade: [(s,e),...]}) from
+    mask_intervals.tsv, so recovery can be recomputed against only the off-target
+    clades that stay outside a merged clade."""
+    masks = {}
+    if not path or os.path.basename(path) == "NO_FILE" or not os.path.exists(path):
+        return masks
+    with open(path) as fh:
+        col = {n: i for i, n in enumerate(fh.readline().rstrip("\n").split("\t"))}
+        for line in fh:
+            f = line.rstrip("\n").split("\t")
+            if col.get("rank") is not None and f[col["rank"]] != "species":
+                continue
+            key = (f[col["clade"]], f[col["cluster"]])
+            glen = int(f[col["gene_len"]] or 0)
+            enc = f[col["clade_masks"]] if col["clade_masks"] < len(f) else ""
+            per = {}
+            if enc:
+                for chunk in enc.split("|"):
+                    oc, _, spans = chunk.partition(":")
+                    ivs = []
+                    for sp in spans.split(","):
+                        if "-" in sp:
+                            a, b = sp.split("-", 1)
+                            ivs.append((int(a), int(b)))
+                    if ivs:
+                        per[oc] = ivs
+            masks[key] = (glen, per)
+    return masks
+
+
+def _merge_intervals(intervals):
+    if not intervals:
+        return []
+    iv = sorted(intervals)
+    out = [list(iv[0])]
+    for s, e in iv[1:]:
+        if s <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], e)
+        else:
+            out.append([s, e])
+    return [(s, e) for s, e in out]
+
+
+def _longest_clean(intervals, n):
+    best, prev = 0, 0
+    for s, e in intervals:
+        best = max(best, s - prev)
+        prev = e
+    return max(best, n - prev)
+
+
+def survives_guard(cl, clade_set, member_keys, guard, masks, p):
+    """Does cluster cl survive the cross-map guard for the merged clade -- AFTER
+    re-masking against only the off-target clades that stay OUTSIDE clade_set
+    (merging absorbs the rest)? Clean-as-is or fully-absorbed markers pass; a
+    partially cross-mapping one passes iff a clean window >= recovery_min_clean bp
+    remains with <= recovery_max_masked_frac masked."""
+    queried, clean, off_clades, _ = guard
+    keys = [k for k in member_keys if k in queried]
+    if not keys:
+        return False                       # never emitted for a member
+    if any(k in clean for k in keys):
+        return True                        # unique as-is for a member (stays unique)
+    residual = set()
+    for k in keys:
+        residual |= off_clades.get(k, set())
+    residual -= clade_set                  # merging absorbs the in-clade off-targets
+    if not residual:
+        return True                        # all off-targets now inside the clade
+    glen = max((masks[k][0] for k in keys if k in masks), default=0)
+    if glen <= 0:
+        return False
+    mask = []
+    for oc in residual:
+        found = []
+        for k in keys:
+            per = masks.get(k, (0, {}))[1]
+            if oc in per:
+                found.extend(per[oc])
+        # An off-target clade with a hit but no localised intervals (target CDS
+        # unavailable) is treated as fully masking -- conservative, never recovers.
+        mask.extend(found if found else [(0, glen)])
+    merged = _merge_intervals(mask)
+    clean_bp = _longest_clean(merged, glen)
+    masked_frac = sum(e - s for s, e in merged) / glen
+    return clean_bp >= p["recovery_min_clean"] \
+        and masked_frac <= p["recovery_max_masked_frac"]
+
+
+def marker_set(clade_species, per, total, size, score, n_total, p, guard, masks):
     """Final marker set for the merged clade, applying every pipeline filter:
-    prevalence -> score+cap -> length+cross-map guard (off-targets inside the
-    merged clade, or mask-recovered). Also returns the prevalence CORE set (used
-    to pick the next neighbour)."""
-    off_union, recovered, queried, guard_on = guard
+    prevalence -> score+cap -> length + cross-map guard WITH masking RE-APPLIED for
+    the merged clade (a marker is kept if, after absorbing the merged members'
+    clades, a clean window >= recovery_min_clean bp remains). Also returns the
+    prevalence CORE set (used to pick the next neighbour)."""
+    guard_on = guard[3]
     size_C = sum(size[s] for s in clade_species)
     score_C = sum(score[s] for s in clade_species)
     if size_C < p["min_clade_size"]:
@@ -167,15 +258,14 @@ def marker_set(clade_species, per, total, size, score, n_total, p, guard):
         candidates.append((in_prev * (1.0 - out_prev) ** p["score_out_exp"], cluster))
 
     # SCORE's cap: keep the top max_per_clade by score BEFORE the guard (matching
-    # the pipeline order), then apply length + cross-map guard.
+    # the pipeline order), then apply length + cross-map guard (with re-masking).
     candidates.sort(key=lambda t: t[0], reverse=True)
     markers = set()
     for _, cl in candidates[: p["max_per_clade"]]:
         if guard_on:
-            if cl not in queried:          # length-dropped or never emitted
+            member_keys = [(m, cl) for m in clade_species]
+            if not survives_guard(cl, clade_set, member_keys, guard, masks, p):
                 continue
-            if not (cl in recovered or off_union.get(cl, set()) <= clade_set):
-                continue                   # still cross-maps outside the merged clade
         markers.add(cl)
     return markers, core
 
@@ -195,10 +285,10 @@ def next_neighbour(clade_species, core, per, candidates):
 
 
 def probe_species(sp, genus, genus_species, per, total, size, score, n_total, p,
-                  guard, threshold, max_steps):
+                  guard, masks, threshold, max_steps):
     """Greedy merge trajectory for one seed species. Returns a result dict."""
     clade = [sp]
-    markers, core = marker_set(clade, per, total, size, score, n_total, p, guard)
+    markers, core = marker_set(clade, per, total, size, score, n_total, p, guard, masks)
     steps = [(sp, len(markers))]               # (seed-or-added species, markers)
     for _ in range(max_steps):
         if steps[-1][1] >= threshold:          # bar already cleared -- stop merging
@@ -207,7 +297,7 @@ def probe_species(sp, genus, genus_species, per, total, size, score, n_total, p,
         if not nb or ov == 0:                  # no overlapping species left
             break
         clade.append(nb)
-        markers, core = marker_set(clade, per, total, size, score, n_total, p, guard)
+        markers, core = marker_set(clade, per, total, size, score, n_total, p, guard, masks)
         steps.append((nb, len(markers)))
 
     base = steps[0][1]
@@ -242,6 +332,8 @@ def main():
                     help="low_marker_species.tsv (flagged column)")
     ap.add_argument("--specificity", help="specificity_report.tsv (final-filter "
                     "guard; omit only if the cross-map guard did not run)")
+    ap.add_argument("--mask_intervals", help="mask_intervals.tsv (per-off-target-"
+                    "clade masked spans, for re-masking after a merge)")
     ap.add_argument("--threshold", type=int, default=50,
                     help="minimum requested markers; merging stops once reached")
     ap.add_argument("--min_in", type=float, default=0.80)
@@ -249,17 +341,22 @@ def main():
     ap.add_argument("--min_clade_size", type=int, default=3)
     ap.add_argument("--max_per_clade", type=int, default=100)
     ap.add_argument("--score_out_exp", type=float, default=1.0)
+    ap.add_argument("--recovery_min_clean", type=int, default=300)
+    ap.add_argument("--recovery_max_masked_frac", type=float, default=0.5)
     ap.add_argument("--max_steps", type=int, default=25)
     ap.add_argument("--outdir", default=".")
     args = ap.parse_args()
 
     p = dict(min_in=args.min_in, max_out=args.max_out,
              min_clade_size=args.min_clade_size, max_per_clade=args.max_per_clade,
-             score_out_exp=args.score_out_exp)
+             score_out_exp=args.score_out_exp,
+             recovery_min_clean=args.recovery_min_clean,
+             recovery_max_masked_frac=args.recovery_max_masked_frac)
 
     size, score, mani_genus, n_total = load_manifest(args.manifest)
     flagged, flag_genus = load_flagged(args.low_marker_species)
     guard = load_guard(args.specificity)
+    masks = load_mask_intervals(args.mask_intervals)
     if not guard[3]:
         sys.stderr.write("[merge_gain] WARNING: no specificity_report -- marker "
                          "counts are prevalence-only, NOT after the cross-map guard\n")
@@ -287,7 +384,7 @@ def main():
         genus = mani_genus.get(sp, flag_genus.get(sp))
         genus_species = {s for s, g in mani_genus.items() if g == genus}
         rows.append(probe_species(sp, genus, genus_species, per, total, size,
-                                  score, n_total, p, guard, args.threshold,
+                                  score, n_total, p, guard, masks, args.threshold,
                                   args.max_steps))
 
     rows.sort(key=lambda r: (r["reached_threshold"] != "yes", -r["delta"]))

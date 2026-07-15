@@ -9,13 +9,15 @@ process REPORT {
     path clade_sizes       // clade_sizes.tsv
     path scored            // markers.tsv (SCORE selected, post-cap)
     path spec_report       // specificity_report.tsv, or the NO_FILE placeholder
+    path merge_gain        // merge_gain.tsv, or the NO_FILE placeholder
 
     output:
     path 'report.html', emit: report
 
     script:
-    // stdlib-python only. The specificity report is optional: when the guard is
-    // off, a NO_FILE placeholder is staged and the report omits the QC stage.
+    // stdlib-python only. The specificity report and merge_gain table are optional:
+    // when the guard / low-marker stage is off, a NO_FILE placeholder is staged and
+    // the report omits that section.
     """
     build_report.py \\
         --manifest ${manifest} \\
@@ -24,6 +26,7 @@ process REPORT {
         --clade_sizes ${clade_sizes} \\
         --markers ${scored} \\
         --specificity ${spec_report} \\
+        --merge_gain ${merge_gain} \\
         --min_in ${params.min_in_prevalence} \\
         --max_out ${params.max_out_prevalence} \\
         --min_clade_size ${params.min_clade_size} \\

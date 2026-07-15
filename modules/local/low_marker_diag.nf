@@ -141,6 +141,7 @@ process MERGE_GAIN {
     path counts                // counts.tsv
     path low_marker_species    // low_marker_species.tsv (flagged column)
     path spec_report           // specificity_report.tsv (final-filter guard)
+    path mask_intervals        // mask_intervals.tsv (per-clade masked spans)
 
     output:
     path 'merge_gain.tsv', emit: gain
@@ -152,12 +153,15 @@ process MERGE_GAIN {
         --counts ${counts} \\
         --low_marker_species ${low_marker_species} \\
         --specificity ${spec_report} \\
+        --mask_intervals ${mask_intervals} \\
         --threshold ${params.low_marker_threshold} \\
         --min_in ${params.min_in_prevalence} \\
         --max_out ${params.max_out_prevalence} \\
         --min_clade_size ${params.min_clade_size} \\
         --max_per_clade ${params.max_markers_per_clade} \\
         --score_out_exp ${params.score_out_exp} \\
+        --recovery_min_clean ${params.mask_recovery_min_clean} \\
+        --recovery_max_masked_frac ${params.mask_recovery_max_masked_frac} \\
         --outdir .
     """
 
