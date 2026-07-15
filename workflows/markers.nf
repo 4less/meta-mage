@@ -21,6 +21,7 @@ include { SPECIFICITY    } from '../modules/local/specificity.nf'
 include { DIVERSITY      } from '../modules/local/diversity.nf'
 include { EMIT_DB        } from '../modules/local/emit_db.nf'
 include { REPORT         } from '../modules/local/report.nf'
+include { LOW_MARKER_MASKING; ANI_GAP; LOW_MARKER_REPORT } from '../modules/local/low_marker_diag.nf'
 
 workflow MARKERS {
 
@@ -32,7 +33,8 @@ workflow MARKERS {
     genomes = manifest
         .splitCsv(header: true, sep: '\t')
         .map { row -> tuple(
-            [ id: row.genome_id, idx: row.idx, is_rep: row.is_rep == '1' ],
+            [ id: row.genome_id, idx: row.idx, is_rep: row.is_rep == '1',
+              genus: row.genus, species: row.species ],
             file(row.path)
         ) }
 
@@ -104,6 +106,44 @@ workflow MARKERS {
         markers_final = SPECIFICITY.out.markers
         fasta_final   = SPECIFICITY.out.marker_fasta
         spec_report   = SPECIFICITY.out.report
+
+        // 9b. Low-marker diagnostics: for species with < low_marker_threshold final
+        //     markers, ask whether their dropped markers are rescuable by masking,
+        //     and whether the species has a within/between ANI gap in its genus.
+        if( params.low_marker_threshold > 0 ) {
+            LOW_MARKER_MASKING(
+                manifest,
+                SPECIFICITY.out.markers,
+                SPECIFICITY.out.report,
+                CROSSMAP.out.idmap,
+                CROSSMAP.out.hits,
+                EMIT_REPS.out.marker_fasta,
+                reps_fna
+            )
+
+            // Genera that contain at least one flagged species.
+            flagged_genera = LOW_MARKER_MASKING.out.species
+                .splitCsv(header: true, sep: '\t')
+                .filter { it.flagged == 'yes' }
+                .map { it.genus }
+                .unique()
+                .collect()
+
+            // Stage only the genomes of those genera for skani.
+            ani_genomes = genomes
+                .combine(flagged_genera)
+                .filter { meta, fa, genera -> genera.contains(meta.genus) }
+                .map { meta, fa, genera -> fa }
+                .collect()
+
+            ANI_GAP(manifest, LOW_MARKER_MASKING.out.species, ani_genomes)
+            LOW_MARKER_REPORT(
+                LOW_MARKER_MASKING.out.species,
+                LOW_MARKER_MASKING.out.summary,
+                ANI_GAP.out.pairs,
+                ANI_GAP.out.gap
+            )
+        }
     } else {
         markers_final = SCORE.out.markers
         fasta_final   = EMIT_REPS.out.marker_fasta

@@ -29,6 +29,7 @@ rank. Output is a single dependency-free HTML file (stdlib only).
 """
 import argparse
 import html
+import json
 import os
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -440,6 +441,95 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
         ]
     )
 
+    # Column-header tooltips: definition + exact filter + the run's parameters.
+    cp = f"{p['core_prevalence']:.0%}"
+    mi, mo = args.min_in, args.max_out
+    mcs, mpc = args.min_clade_size, args.max_per_clade
+    mgps = args.min_genomes_per_species
+    qid = f"{args.min_in:.0%}"
+    tips = {
+        "genomes": (
+            "<b>Genomes</b>"
+            "<div>Genomes of this species kept after the genome-count prefilter. "
+            "This is the denominator N used for every in-species prevalence.</div>"
+            f"<div class='p'>min_genomes_per_species = {mgps}</div>"
+        ),
+        "pangenome": (
+            "<b>Pangenome</b>"
+            "<div>Every gene family (cluster) seen in &ge;1 genome of the "
+            "species &mdash; the starting pool of the funnel.</div>"
+            "<div class='f'>Filter: none</div>"
+            "<div class='p'>= count of all species-rank clusters for this "
+            "species in counts.tsv</div>"
+        ),
+        "core": (
+            "<b>Core</b>"
+            "<div>Gene families present in most of the species' genomes.</div>"
+            f"<div class='f'>keep if&nbsp;&nbsp;in_prev &ge; {cp}</div>"
+            "<div class='p'>in_prev = in_count / genomes"
+            f"<br>parameter: core_prevalence = {p['core_prevalence']}</div>"
+        ),
+        "not_core": (
+            "<b>Not core</b>"
+            "<div>Gene families dropped at the core step.</div>"
+            f"<div class='f'>in_prev &lt; {cp}</div>"
+            "<div class='p'>= Pangenome &minus; Core</div>"
+        ),
+        "specific": (
+            "<b>Specific</b>"
+            "<div>Core genes clade-specific enough to be markers. "
+            "All three must hold:</div>"
+            f"<div class='f'>genomes &ge; {mcs}<br>"
+            f"in_prev &ge; {mi}<br>"
+            f"out_prev &le; {mo}</div>"
+            "<div class='p'>out_prev = (marker_total &minus; in_count) / "
+            "(total_genomes &minus; genomes)"
+            f"<br>parameters: min_clade_size = {mcs}, min_in = {mi}, "
+            f"max_out = {mo}</div>"
+        ),
+        "not_specific": (
+            "<b>Not specific</b>"
+            "<div>Core genes that failed the specificity test for any reason:</div>"
+            f"<div class='f'>genomes &lt; {mcs}"
+            f"<br>&nbsp;&nbsp;OR&nbsp; in_prev &lt; {mi}"
+            f"<br>&nbsp;&nbsp;OR&nbsp; out_prev &gt; {mo}</div>"
+            "<div class='p'>= Core &minus; Specific</div>"
+        ),
+        "capped": (
+            "<b>Capped</b>"
+            "<div>Specific candidates discarded because the per-clade marker cap "
+            "was reached; SCORE keeps only the top-scoring markers per clade.</div>"
+            f"<div class='f'>rank &gt; {mpc} by score</div>"
+            f"<div class='p'>parameter: max_per_clade = {mpc}"
+            "<br>= Specific &minus; Selected</div>"
+        ),
+        "selected": (
+            "<b>Selected</b>"
+            "<div>Specific candidates kept after the per-clade cap &mdash; the "
+            "markers SCORE actually selected (pre-QC).</div>"
+            f"<div class='f'>top &le; {mpc} per clade, by score</div>"
+            f"<div class='p'>parameter: max_per_clade = {mpc}</div>"
+        ),
+        "qc_dropped": (
+            "<b>QC dropped</b>"
+            "<div>Selected markers removed by the nucleotide cross-map guard: the "
+            "marker sequence also maps to a genome <em>outside</em> the target "
+            f"clade at &ge; {qid}-scale identity, so it would steal reads from the "
+            "off-target taxon.</div>"
+            "<div class='f'>specificity_report verdict = fail</div>"
+            "<div class='p'>= Selected &minus; Final"
+            "<br><b>not</b> included in Final</div>"
+        ),
+        "final": (
+            "<b>Final</b>"
+            "<div>Markers that survived every stage, including cross-map QC. "
+            "This is the marker set written to the DB.</div>"
+            "<div class='f'>= Selected &minus; QC dropped</div>"
+            "<div class='p'>QC-dropped genes are excluded from this count.</div>"
+        ),
+    }
+    tips_json = json.dumps(tips)
+
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -487,6 +577,19 @@ tbody tr:hover td {{ background:var(--panel2); }}
 .note.ok {{ color:var(--ok); }}
 code {{ background:var(--panel2); padding:1px 5px; border-radius:4px; font-size:12px; }}
 .legend {{ color:var(--dim); font-size:12px; margin:6px 2px 0; }}
+th.has-tip {{ cursor:help; }}
+th.has-tip::after {{ content:"\\00a0\\24d8"; color:var(--accent); font-size:10px;
+  opacity:.75; font-weight:400; }}
+#tip {{ position:absolute; z-index:50; display:none; max-width:340px;
+  background:var(--panel); color:var(--fg); border:1px solid var(--line);
+  border-radius:8px; padding:11px 13px; font-size:12px; line-height:1.5;
+  text-align:left; box-shadow:0 10px 30px rgba(0,0,0,.4); pointer-events:none; }}
+#tip b {{ color:var(--accent); font-size:13px; }}
+#tip div {{ margin-top:5px; }}
+#tip .f {{ margin-top:7px; font-family:ui-monospace,Menlo,Consolas,monospace;
+  font-size:11.5px; color:var(--fg); }}
+#tip .p {{ margin-top:7px; color:var(--dim); font-size:11px;
+  border-top:1px solid var(--line); padding-top:6px; }}
 </style></head>
 <body><div class="wrap">
 <h1>meta-mage &mdash; marker gene report</h1>
@@ -504,14 +607,17 @@ prevalence) &rarr; <b>selected</b> (drop: over the {p['max_per_clade']}/clade ca
 &rarr; <b>final</b> (drop: cross-map QC). Rows in amber ended with zero markers.</p>
 {trunc_note}
 <div class="tablewrap"><table><thead><tr>
-<th>Species</th><th>Genus</th><th>Genomes</th><th>Pangenome</th><th>Core</th>
-<th>Not core</th><th>Specific</th><th>Not specific</th><th>Capped</th>
-<th>QC dropped</th><th>Final</th></tr></thead>
+<th>Species</th><th>Genus</th><th data-tip="genomes">Genomes</th>
+<th data-tip="pangenome">Pangenome</th><th data-tip="core">Core</th>
+<th data-tip="not_core">Not core</th><th data-tip="specific">Specific</th>
+<th data-tip="not_specific">Not specific</th><th data-tip="capped">Capped</th>
+<th data-tip="qc_dropped">QC dropped</th><th data-tip="final">Final</th></tr></thead>
 <tbody>{''.join(body_rows)}</tbody></table></div>
 
 <h2>Markers by rank</h2>
-<div class="tablewrap"><table><thead><tr><th>Rank</th><th>Selected</th>
-<th>QC dropped</th><th>Final</th></tr></thead>
+<div class="tablewrap"><table><thead><tr><th>Rank</th>
+<th data-tip="selected">Selected</th><th data-tip="qc_dropped">QC dropped</th>
+<th data-tip="final">Final</th></tr></thead>
 <tbody>{''.join(rank_body)}</tbody></table></div>
 
 <h2>Genes removed by QC (nucleotide cross-map guard)</h2>
@@ -524,7 +630,34 @@ too few genomes, or kept but yielding zero clade-specific markers.</p>
 
 <h2>Species removed by the genome-count prefilter</h2>
 {pre_section}
-</div></body></html>
+</div>
+<script>
+const TIPS = {tips_json};
+(function(){{
+  const tip = document.createElement('div');
+  tip.id = 'tip';
+  document.body.appendChild(tip);
+  document.querySelectorAll('th[data-tip]').forEach(function(th){{
+    const key = th.getAttribute('data-tip');
+    if(!TIPS[key]) return;
+    th.classList.add('has-tip');
+    th.addEventListener('mouseenter', function(){{
+      tip.innerHTML = TIPS[key];
+      tip.style.display = 'block';
+      const r = th.getBoundingClientRect();
+      const w = tip.offsetWidth;
+      let left = r.left + window.scrollX;
+      const maxLeft = window.scrollX + document.documentElement.clientWidth - w - 12;
+      if(left > maxLeft) left = maxLeft;
+      if(left < window.scrollX + 8) left = window.scrollX + 8;
+      tip.style.left = left + 'px';
+      tip.style.top = (r.bottom + window.scrollY + 6) + 'px';
+    }});
+    th.addEventListener('mouseleave', function(){{ tip.style.display = 'none'; }});
+  }});
+}})();
+</script>
+</body></html>
 """
 
 
