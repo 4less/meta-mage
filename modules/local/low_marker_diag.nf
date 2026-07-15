@@ -140,6 +140,7 @@ process MERGE_GAIN {
     path manifest              // manifest.tsv
     path counts                // counts.tsv
     path low_marker_species    // low_marker_species.tsv (flagged column)
+    path spec_report           // specificity_report.tsv (final-filter guard)
 
     output:
     path 'merge_gain.tsv', emit: gain
@@ -150,11 +151,13 @@ process MERGE_GAIN {
         --manifest ${manifest} \\
         --counts ${counts} \\
         --low_marker_species ${low_marker_species} \\
+        --specificity ${spec_report} \\
         --threshold ${params.low_marker_threshold} \\
         --min_in ${params.min_in_prevalence} \\
         --max_out ${params.max_out_prevalence} \\
         --min_clade_size ${params.min_clade_size} \\
         --max_per_clade ${params.max_markers_per_clade} \\
+        --score_out_exp ${params.score_out_exp} \\
         --outdir .
     """
 

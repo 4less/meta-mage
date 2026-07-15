@@ -71,7 +71,9 @@ def build_data(rows):
     for home, passed, n_off, max_id, worst in rows:
         species.add(home)
         totals[home] += 1
-        if passed or not worst:
+        # A marker leaks if it has an off-target clade -- including mask-recovered
+        # markers (pass=1 now, but still cross-map over the masked stretch).
+        if not worst:
             continue
         species.add(worst)
         leaking[home] += 1

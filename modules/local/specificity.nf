@@ -8,6 +8,7 @@ process SPECIFICITY {
     path markers       // scored marker table
     path marker_fasta  // emitted marker CDS
     path manifest
+    path target_cds    // all_cds.ffn: off-target CDS universe for mask recovery
 
     output:
     path 'markers.specific.tsv',   emit: markers
@@ -15,6 +16,11 @@ process SPECIFICITY {
     path 'specificity_report.tsv', emit: report
 
     script:
+    // A cross-mapping marker is RECOVERED (kept whole) if masking the shared
+    // stretches still leaves a clean window >= mask_recovery_min_clean bp with
+    // <= mask_recovery_max_masked_frac of the gene masked. --target off = legacy
+    // binary guard.
+    def recover = params.mask_recovery ? "--target ${target_cds} --recovery_min_clean ${params.mask_recovery_min_clean} --recovery_max_masked_frac ${params.mask_recovery_max_masked_frac}" : ''
     """
     specificity_guard.py \\
         --hits ${hits} \\
@@ -24,6 +30,7 @@ process SPECIFICITY {
         --manifest ${manifest} \\
         --min_id ${params.specificity_min_id} \\
         --min_aln ${params.specificity_min_aln} \\
+        ${recover} \\
         --out_markers markers.specific.tsv \\
         --out_fasta markers.specific.fasta \\
         --report specificity_report.tsv
