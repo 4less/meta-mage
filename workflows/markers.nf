@@ -21,7 +21,7 @@ include { SPECIFICITY    } from '../modules/local/specificity.nf'
 include { DIVERSITY      } from '../modules/local/diversity.nf'
 include { EMIT_DB        } from '../modules/local/emit_db.nf'
 include { REPORT         } from '../modules/local/report.nf'
-include { LOW_MARKER_MASKING; ANI_GAP; LOW_MARKER_REPORT } from '../modules/local/low_marker_diag.nf'
+include { LOW_MARKER_MASKING; ANI_SKANI; ANI_GAP; LOW_MARKER_REPORT } from '../modules/local/low_marker_diag.nf'
 
 workflow MARKERS {
 
@@ -136,7 +136,8 @@ workflow MARKERS {
                 .map { meta, fa, genera -> fa }
                 .collect()
 
-            ANI_GAP(manifest, LOW_MARKER_MASKING.out.species, ani_genomes)
+            ANI_SKANI(ani_genomes)
+            ANI_GAP(manifest, LOW_MARKER_MASKING.out.species, ANI_SKANI.out.sparse)
             LOW_MARKER_REPORT(
                 LOW_MARKER_MASKING.out.species,
                 LOW_MARKER_MASKING.out.summary,

@@ -6,8 +6,10 @@ For each (cluster, rank, clade):
     in_prevalence  = in_count / clade_size
     out_prevalence = (marker_total - in_count) / (N - clade_size)
 Keep markers with in_prevalence >= min_in and out_prevalence <= max_out, on
-clades of at least min_clade_size. Rank candidates per clade by (in - out) and
-cap at max_per_clade to keep the classifier DB balanced.
+clades of at least min_clade_size. Rank candidates per clade by
+    score = in_prevalence * (1 - out_prevalence) ** score_out_exp
+and cap at max_per_clade to keep the classifier DB balanced. The exponent
+weights how hard off-target prevalence is penalised (1 = linear).
 
 Streaming: the counts file is read once; only the passing candidates are held
 (far smaller than the full counts), then grouped and capped.
@@ -40,6 +42,8 @@ def main():
     ap.add_argument("--max_out", type=float, required=True)
     ap.add_argument("--min_clade_size", type=int, required=True)
     ap.add_argument("--max_per_clade", type=int, required=True)
+    ap.add_argument("--score_out_exp", type=float, default=1.0,
+                    help="exponent on (1 - out_prevalence) in the rank score")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -62,7 +66,7 @@ def main():
             in_prev = in_count / size
             out_prev = (marker_total - in_count) / out_denom
             if in_prev >= args.min_in and out_prev <= args.max_out:
-                score = in_prev - out_prev
+                score = in_prev * (1.0 - out_prev) ** args.score_out_exp
                 by_clade[(rank, clade)].append(
                     (score, cluster, in_prev, out_prev, in_count, size)
                 )

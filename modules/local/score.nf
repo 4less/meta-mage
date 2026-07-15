@@ -17,6 +17,7 @@ process SCORE {
         --max_out ${params.max_out_prevalence} \\
         --min_clade_size ${params.min_clade_size} \\
         --max_per_clade ${params.max_markers_per_clade} \\
+        --score_out_exp ${params.score_out_exp} \\
         --out markers.tsv
     """
 }

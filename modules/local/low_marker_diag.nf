@@ -47,20 +47,58 @@ process LOW_MARKER_MASKING {
     """
 }
 
+process ANI_SKANI {
+    tag "ani_skani"
+    publishDir "${params.outdir}/low_marker", mode: 'copy'
+
+    // skani runs in its own image (which has NO python) -- so this process does
+    // ONLY the skani call; the python aggregation is a separate process below.
+    conda "bioconda::skani=0.3.2"
+    container "${workflow.containerEngine in ['singularity', 'apptainer'] && !task.ext.singularity_pull_docker_container
+        ? 'https://depot.galaxyproject.org/singularity/skani:0.3.2--h79ce301_0'
+        : 'quay.io/biocontainers/skani:0.3.2--h79ce301_0'}"
+
+    input:
+    path genomes               // staged genome FASTAs for flagged genera
+
+    output:
+    path 'skani.sparse.tsv', emit: sparse
+
+    script:
+    // One all-vs-all triangle over every staged genome; the -s 80 screen drops
+    // cross-genus pairs (<80% ANI) automatically, and the python step keeps only
+    // same-genus pairs anyway. -E = sparse edge list (Ref Query ANI af_ref af_query).
+    """
+    find -L . -maxdepth 1 -type f \\
+        \\( -name '*.fna.gz' -o -name '*.fa.gz' -o -name '*.fasta.gz' \\
+           -o -name '*.fna' -o -name '*.fa' -o -name '*.fasta' \\) > genomes.txt
+    skani triangle \\
+        -l genomes.txt \\
+        -o skani.sparse.tsv \\
+        -E \\
+        --min-af ${params.low_marker_min_af * 100} \\
+        -s 80 \\
+        -t ${task.cpus}
+    """
+
+    stub:
+    """
+    printf 'Ref_file\\tQuery_file\\tANI\\tAlign_fraction_ref\\tAlign_fraction_query\\n' > skani.sparse.tsv
+    """
+}
+
 process ANI_GAP {
     tag "ani_gap"
     publishDir "${params.outdir}/low_marker", mode: 'copy'
 
-    conda "bioconda::skani=0.2.2"
-    // biocontainers image; bump the tag/build if you pin a different skani.
-    container "${workflow.containerEngine in ['singularity', 'apptainer'] && !task.ext.singularity_pull_docker_container
-        ? 'https://depot.galaxyproject.org/singularity/skani:0.2.2--h4ac6f70_0'
-        : 'quay.io/biocontainers/skani:0.2.2--h4ac6f70_0'}"
+    // Pure stdlib-python: parse the skani sparse table, split within/between,
+    // compute the ANI gap. Runs in the default env (has python3), NOT the skani
+    // container.
 
     input:
     path manifest              // manifest.tsv
     path low_marker_species    // low_marker_species.tsv (flagged column)
-    path genomes               // staged genome FASTAs for flagged genera
+    path sparse                // skani.sparse.tsv from ANI_SKANI
 
     output:
     path 'ani_pairs.tsv',       emit: pairs
@@ -71,10 +109,9 @@ process ANI_GAP {
     ani_gap.py \\
         --manifest ${manifest} \\
         --low_marker_species ${low_marker_species} \\
-        --genome_dir . \\
+        --sparse ${sparse} \\
         --ani ${params.low_marker_ani} \\
         --min_af ${params.low_marker_min_af} \\
-        --threads ${task.cpus} \\
         --outdir .
     """
 
