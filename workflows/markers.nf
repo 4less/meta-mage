@@ -24,6 +24,7 @@ include { MARKER_ANI     } from '../modules/local/marker_ani.nf'
 include { DIVERSITY      } from '../modules/local/diversity.nf'
 include { EMIT_DB        } from '../modules/local/emit_db.nf'
 include { REPORT; LEAKAGE_REPORT } from '../modules/local/report.nf'
+include { PREVALENCE_CURVES } from '../modules/local/prevalence_curves.nf'
 include { LOW_MARKER_MASKING; ANI_SKANI; ANI_GAP; MERGE_GAIN; MASKING_REPORT; LOW_MARKER_REPORT } from '../modules/local/low_marker_diag.nf'
 
 workflow MARKERS {
@@ -115,6 +116,8 @@ workflow MARKERS {
     merge_gain_report = file("${projectDir}/assets/NO_FILE")
     // Nakedness of cross-map drops; NO_FILE unless the guard runs.
     nakedness_report = file("${projectDir}/assets/NO_FILE")
+    // Adaptive-relaxation rescued markers; NO_FILE unless relaxation runs.
+    relaxed_report = file("${projectDir}/assets/NO_FILE")
     if( params.specificity ) {
         CROSSMAP(EMIT_REPS.out.marker_fasta, all_cds)
         SPECIFICITY(CROSSMAP.out.hits, CROSSMAP.out.idmap, markers_emitted, EMIT_REPS.out.marker_fasta, manifest, all_cds)
@@ -211,6 +214,7 @@ workflow MARKERS {
                             SELECT_RELAXED.out.markers, SELECT_RELAXED.out.marker_fasta)
                 markers_final = MERGE_RELAX.out.markers
                 fasta_final   = MERGE_RELAX.out.marker_fasta
+                relaxed_report = SELECT_RELAXED.out.markers
             }
         }
     } else {
@@ -225,6 +229,9 @@ workflow MARKERS {
 
     // 11. Final classifier DB: FASTA + annotated marker table.
     EMIT_DB(DIVERSITY.out.marker_table, fasta_final)
+
+    // 11a. Standalone per-species gene-prevalence curves (own HTML, dropdown).
+    PREVALENCE_CURVES(COUNTS.out.counts, COUNTS.out.clade_sizes)
 
     // 11b. Per-species pairwise marker ANI at each filtering stage (report
     //      boxplots): for each top-scoring marker, pairwise distance among its
@@ -247,6 +254,7 @@ workflow MARKERS {
         spec_report,
         merge_gain_report,
         nakedness_report,
-        MARKER_ANI.out.ani
+        MARKER_ANI.out.ani,
+        relaxed_report
     )
 }

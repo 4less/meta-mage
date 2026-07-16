@@ -127,6 +127,31 @@ def load_merge_gain(path):
     return rows
 
 
+def load_relaxed(path):
+    """species -> (count, min_in, max_in) of markers rescued by the adaptive
+    in-prevalence relaxation. Empty when relaxation didn't run."""
+    if not path or os.path.basename(path) == "NO_FILE" or not os.path.exists(path):
+        return {}
+    per = {}
+    with open(path) as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        ip_i = header.index("in_prevalence") if "in_prevalence" in header else None
+        for line in fh:
+            f = line.rstrip("\n").split("\t")
+            if len(f) < 3 or f[0] != "species":
+                continue
+            d = per.setdefault(f[1], [0, 1.0, 0.0])
+            d[0] += 1
+            if ip_i is not None and ip_i < len(f):
+                try:
+                    ip = float(f[ip_i])
+                    d[1] = min(d[1], ip)
+                    d[2] = max(d[2], ip)
+                except ValueError:
+                    pass
+    return {sp: tuple(v) for sp, v in per.items()}
+
+
 def load_nakedness(path):
     """nakedness.tsv rows (list of dicts) or [] when absent. Classifies each
     guard-dropped marker as 'naked' (>=1 off-target clade with no competing
@@ -284,6 +309,8 @@ def main():
                     "contested classification of cross-map-dropped markers")
     ap.add_argument("--marker_ani", help="marker_ani.json (or NO_FILE) -- per-"
                     "species pairwise marker ANI at each filtering stage")
+    ap.add_argument("--relaxed", help="rescued.markers.tsv (or NO_FILE) -- markers "
+                    "recovered by the adaptive in-prevalence relaxation")
     ap.add_argument("--merge_gain", help="merge_gain.tsv (or NO_FILE) -- merge "
                     "assessment for low-marker species")
     ap.add_argument("--min_in", type=float, required=True)
@@ -391,6 +418,10 @@ def main():
         "naked": sum(d["naked"] for d in sp_naked.values()),
     }
 
+    # ---- markers rescued by the adaptive in-prevalence relaxation, per species.
+    sp_relax = load_relaxed(args.relaxed)
+    tot_relax = sum(v[0] for v in sp_relax.values())
+
     # ---- per-species pairwise marker ANI (report boxplots), embedded verbatim.
     marker_ani = {}
     if (args.marker_ani and os.path.basename(args.marker_ani) != "NO_FILE"
@@ -404,8 +435,10 @@ def main():
         rank_selected, rank_final, rank_qc_dropped, rank_rescued,
         qc_removed, dropped, genus_species, genus_prefilter, genus_zero,
         zero_marker_species, merge_gain, sp_naked, naked_totals, marker_ani,
+        sp_relax,
         totals=dict(pangenome=tot_pangenome, core=tot_core, specific=tot_specific,
-                    selected=tot_selected, final=tot_final, rescued=tot_rescued),
+                    selected=tot_selected, final=tot_final, rescued=tot_rescued,
+                    relax=tot_relax),
     )
     with open(args.out, "w") as fh:
         fh.write(html_out)
@@ -419,14 +452,24 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
                 rank_selected, rank_final, rank_qc_dropped, rank_rescued,
                 qc_removed, dropped, genus_species, genus_prefilter, genus_zero,
                 zero_marker_species, merge_gain, sp_naked, naked_totals,
-                marker_ani, totals):
+                marker_ani, sp_relax, totals):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     # Summary cards.
     rescued = totals.get("rescued", 0)
-    final_sub = ("QC not run" if not qc_ran else
-                 f"after cross-map QC, incl. {rescued:,} mask-rescued" if rescued
-                 else "after cross-map QC + mask recovery")
+    relax = totals.get("relax", 0)
+    final_db = totals["final"] + relax
+    bits = []
+    if rescued:
+        bits.append(f"{rescued:,} mask-rescued")
+    if relax:
+        bits.append(f"{relax:,} relax-rescued")
+    if not qc_ran:
+        final_sub = "QC not run"
+    elif bits:
+        final_sub = "after cross-map QC, incl. " + " + ".join(bits)
+    else:
+        final_sub = "after cross-map QC + mask recovery"
     cards = "".join([
         card("Genomes", f"{n_total:,}"),
         card("Species", f"{n_species:,}"),
@@ -435,7 +478,7 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
         card("Core genes", f"{totals['core']:,}", f">= {p['core_prevalence']:.0%} prevalence"),
         card("Specific candidates", f"{totals['specific']:,}", "pre-cap"),
         card("Selected markers", f"{totals['selected']:,}", f"cap {p['max_per_clade']}/clade"),
-        card("Final markers", f"{totals['final']:,}", final_sub),
+        card("Final markers", f"{final_db:,}", final_sub),
     ])
 
     # Species funnel table.
@@ -444,6 +487,9 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
         key=lambda s: (species_genus.get(s, "NA"), s),
     )
     truncated = len(species_rows) > args.max_table_rows
+    has_relax = bool(sp_relax)
+    relax_head = ("<th data-tip=\"relax_rescued\">+Rlx</th>"
+                  "<th data-tip=\"db_total\">DB</th>") if has_relax else ""
     body_rows = []
     for sp in species_rows[: args.max_table_rows]:
         fn = funnel.get(sp, {})
@@ -457,10 +503,20 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
         # QC dropped = selected minus final; final already includes mask-rescued,
         # so a marker that cross-mapped but was recovered is NOT counted here.
         qc_drop = max(0, sel - fin) if qc_ran else 0
-        cls = " class='warn'" if fin == 0 else ""
+        rlx = sp_relax.get(sp, (0,))[0]
+        db = fin + rlx
+        # Amber = the species contributes nothing to the DB (post-relaxation).
+        cls = " class='warn'" if db == 0 else ""
         # Survivor columns are plain; loss columns carry .loss (dim).
         qc_cell = f"<td class='loss'>{qc_drop}</td>" if qc_ran else "<td class='loss'>-</td>"
         resc_cell = f"<td>{resc}</td>" if qc_ran else "<td>-</td>"
+        if has_relax:
+            fin_cell = f"<td>{fin}</td>"
+            relax_cells = (f"<td class='ok'>{('+' + str(rlx)) if rlx else '0'}</td>"
+                           f"<td class='strong'>{db}</td>")
+        else:
+            fin_cell = f"<td class='strong'>{fin}</td>"
+            relax_cells = ""
         body_rows.append(
             f"<tr{cls}><td class='l'>{esc(sp)}</td>"
             f"<td class='l dim'>{esc(species_genus.get(sp, 'NA'))}</td>"
@@ -471,7 +527,7 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
             f"<td>{spec}</td>"
             f"<td class='loss'>{capped}</td><td>{sel}</td>"
             f"{qc_cell}{resc_cell}"
-            f"<td class='strong'>{fin}</td></tr>"
+            f"{fin_cell}{relax_cells}</tr>"
         )
     trunc_note = (f"<p class='note'>Showing the first {args.max_table_rows:,} of "
                   f"{len(species_rows):,} species (sorted by genus). Full per-marker "
@@ -563,6 +619,41 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
             "<th>Cross-map dropped</th><th>Contested (recoverable)</th>"
             "<th>Naked</th><th>% naked</th></tr></thead>"
             f"<tbody>{body}</tbody></table></div>"
+        )
+
+    # Adaptive in-prevalence relaxation: markers recovered for species that were
+    # below the threshold after mask recovery and merge, by lowering the
+    # in-prevalence floor and keeping only cross-map-free extra candidates.
+    relax_section = ""
+    if sp_relax:
+        tot_r = sum(v[0] for v in sp_relax.values())
+        rrows = sorted(sp_relax.items(), key=lambda kv: -kv[1][0])
+        rbody = []
+        for sp, (cnt, mn, mx) in rrows[: args.max_table_rows]:
+            base = sp_final.get(sp, 0)
+            rng = f"{mn:.2f}&ndash;{mx:.2f}" if cnt else "&mdash;"
+            rbody.append(
+                f"<tr><td class='l'>{esc(sp)}</td>"
+                f"<td class='l dim'>{esc(species_genus.get(sp, 'NA'))}</td>"
+                f"<td>{base}</td><td class='ok'>+{cnt}</td>"
+                f"<td class='strong'>{base + cnt}</td><td class='dim'>{rng}</td></tr>"
+            )
+        relax_section = (
+            "<h2>Adaptive in-prevalence relaxation (marker rescue)</h2>"
+            "<p class='legend'>Species still below the marker threshold after mask "
+            "recovery <b>and</b> without a threshold-reaching merge get their "
+            "in-prevalence floor lowered (from "
+            f"{p['min_in']:.0%} down toward the relax floor) to admit accessory "
+            "genes; those extra candidates are guarded and <b>only cross-map-free "
+            "markers are kept</b>, highest-prevalence tiers first, until the "
+            "threshold is met or the floor is hit. "
+            f"<b>{tot_r:,}</b> markers were rescued across <b>{len(sp_relax)}</b> "
+            "species. <b>In-prev range</b> is the prevalence band the rescued "
+            "markers came from (lower = more accessory).</p>"
+            "<div class='tablewrap'><table><thead><tr><th>Species</th><th>Genus</th>"
+            "<th>Base (Fin)</th><th>Rescued</th><th>DB total</th>"
+            "<th>In-prev range</th></tr></thead>"
+            f"<tbody>{''.join(rbody)}</tbody></table></div>"
         )
 
     # Per-species pairwise marker ANI boxplots (one panel per filtering stage;
@@ -790,6 +881,20 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
             "<div class='f'>= Selected &minus; QC dropped</div>"
             "<div class='p'>QC-dropped genes are excluded from this count.</div>"
         ),
+        "relax_rescued": (
+            "<b>+Rlx</b>"
+            "<div>Markers recovered by the adaptive in-prevalence relaxation: for "
+            "species still below the threshold after mask recovery and merge, the "
+            "in-prevalence floor is lowered (to admit accessory genes) and the "
+            "extra candidates are guarded &mdash; only cross-map-free ones are "
+            "kept.</div>"
+            "<div class='p'>Added on top of Fin; see the relaxation section.</div>"
+        ),
+        "db_total": (
+            "<b>DB</b>"
+            "<div>Total markers this species contributes to the classifier DB.</div>"
+            "<div class='f'>= Fin &plus; &#43;Rlx</div>"
+        ),
     }
     tips_json = json.dumps(tips)
 
@@ -844,6 +949,7 @@ td.loss, th.loss {{ color:var(--dim); font-weight:400;
   border-radius:8px; background:var(--panel); padding:4px 0; }}
 td.strong {{ font-weight:700; color:var(--accent); }}
 span.ok {{ color:var(--ok); font-weight:600; }}
+td.ok {{ color:var(--ok); font-weight:600; }}
 span.warn {{ color:var(--warn); font-weight:600; }}
 span.dim {{ color:var(--dim); }}
 tr.dim td {{ color:var(--dim); }}
@@ -894,8 +1000,10 @@ markers.</p>
 <th data-tip="capped" class="loss">Cap</th><th data-tip="selected">Sel</th>
 <th data-tip="qc_dropped" class="loss">xMap&#10007;</th>
 <th data-tip="rescued">Resc</th>
-<th data-tip="final">Fin</th></tr></thead>
+<th data-tip="final">Fin</th>{relax_head}</tr></thead>
 <tbody>{''.join(body_rows)}</tbody></table></div>
+
+{relax_section}
 
 {ani_section}
 
