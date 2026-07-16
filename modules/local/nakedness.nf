@@ -1,6 +1,10 @@
-process NAKEDNESS {
-    tag "nakedness"
-    label 'process_medium'
+// Nakedness of cross-map drops, in two steps mirroring CROSSMAP -> SPECIFICITY:
+// the marker-vs-marker mmseqs self search runs in the mmseqs container, then the
+// (stdlib-python) classifier runs in the base env -- the mmseqs image has no
+// python, so the two must be separate processes.
+
+process NAKEDNESS_SEARCH {
+    tag "nakedness_search"
     publishDir "${params.outdir}/markers", mode: 'copy'
     cache 'lenient'
 
@@ -12,17 +16,15 @@ process NAKEDNESS {
 
     input:
     path marker_fasta   // emitted marker CDS (rank|clade|cluster|genome headers)
-    path spec_report    // specificity_report.tsv (needs offtarget_clades column)
 
     output:
-    path 'nakedness.tsv', emit: nakedness
+    path 'self.m8',  emit: hits
+    path 'self.map', emit: idmap
 
     script:
-    // Marker-vs-marker: is a dropped marker's cross-map CONTESTED (the off-target
-    // clade has its own competing marker) or NAKED (no competitor -> it truly
-    // steals reads)? Rekey the marker fasta to whitespace-free m<N> ids (clades
-    // contain spaces; mmseqs truncates at whitespace) and search it against
-    // itself. Same identity/window as the guard so the two agree.
+    // Rekey the marker fasta to whitespace-free m<N> ids (clades contain spaces;
+    // mmseqs truncates at whitespace) and search it against itself. Same identity
+    // /window as the guard so the two agree.
     def split_mem = task.memory ? "${(task.memory.toGiga() * 0.85) as long}G" : ''
     def split_arg = split_mem ? "--split-memory-limit ${split_mem}" : ''
     """
@@ -42,10 +44,37 @@ process NAKEDNESS {
         ${split_arg} \\
         --format-output query,target,pident,alnlen \\
         --threads ${task.cpus}
+    """
 
+    stub:
+    """
+    touch self.m8 self.map
+    """
+}
+
+process NAKEDNESS {
+    tag "nakedness"
+    publishDir "${params.outdir}/markers", mode: 'copy'
+
+    // stdlib-python only; runs in the base env like SPECIFICITY (the mmseqs image
+    // has no python), so no container is declared.
+
+    input:
+    path self_hits      // self.m8 (marker-vs-marker mmseqs hits)
+    path self_map       // self.map (m<N> -> rank|clade|cluster|genome)
+    path spec_report    // specificity_report.tsv (needs offtarget_clades column)
+
+    output:
+    path 'nakedness.tsv', emit: nakedness
+
+    script:
+    // Of the markers the guard dropped, how many are NAKED (no competing off-
+    // target marker -> truly steal reads) vs CONTESTED (the off-target clade
+    // markers the region too -> conservatively dropped)?
+    """
     nakedness.py \\
-        --self_hits self.m8 \\
-        --selfmap self.map \\
+        --self_hits ${self_hits} \\
+        --selfmap ${self_map} \\
         --specificity ${spec_report} \\
         --min_id ${params.specificity_min_id} \\
         --min_aln ${params.specificity_min_aln} \\

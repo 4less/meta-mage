@@ -18,7 +18,7 @@ include { SCORE          } from '../modules/local/score.nf'
 include { EMIT_REPS      } from '../modules/local/emit_reps.nf'
 include { CROSSMAP       } from '../modules/local/crossmap.nf'
 include { SPECIFICITY    } from '../modules/local/specificity.nf'
-include { NAKEDNESS      } from '../modules/local/nakedness.nf'
+include { NAKEDNESS_SEARCH; NAKEDNESS } from '../modules/local/nakedness.nf'
 include { MARKER_ANI     } from '../modules/local/marker_ani.nf'
 include { DIVERSITY      } from '../modules/local/diversity.nf'
 include { EMIT_DB        } from '../modules/local/emit_db.nf'
@@ -125,7 +125,9 @@ workflow MARKERS {
         // off-target marker -> truly steal reads) vs CONTESTED (the off-target
         // clade markers the region too -> conservatively dropped). Marker-vs-
         // marker self search + classifier.
-        NAKEDNESS(EMIT_REPS.out.marker_fasta, SPECIFICITY.out.report)
+        NAKEDNESS_SEARCH(EMIT_REPS.out.marker_fasta)
+        NAKEDNESS(NAKEDNESS_SEARCH.out.hits, NAKEDNESS_SEARCH.out.idmap,
+                  SPECIFICITY.out.report)
         nakedness_report = NAKEDNESS.out.nakedness
 
         // Per-species cross-map leakage report (incoming/outgoing, dropdown focus).
