@@ -14,7 +14,8 @@ include { BUILD_MANIFEST } from '../modules/local/build_manifest.nf'
 include { REHEADER as REHEADER_FAA } from '../modules/local/reheader.nf'
 include { REHEADER as REHEADER_FNA } from '../modules/local/reheader.nf'
 include { COUNTS         } from '../modules/local/counts.nf'
-include { SCORE          } from '../modules/local/score.nf'
+include { SCORE; SCORE_RELAX } from '../modules/local/score.nf'
+include { FILTER_RELAX; RELAX_EMIT; RELAX_CROSSMAP; RELAX_GUARD; SELECT_RELAXED; MERGE_RELAX } from '../modules/local/relax.nf'
 include { EMIT_REPS      } from '../modules/local/emit_reps.nf'
 include { CROSSMAP       } from '../modules/local/crossmap.nf'
 include { SPECIFICITY    } from '../modules/local/specificity.nf'
@@ -185,6 +186,32 @@ workflow MARKERS {
                 ANI_GAP.out.gap,
                 MERGE_GAIN.out.gain
             )
+
+            // 9c. Adaptive in-prevalence relaxation. For species still below the
+            //     threshold after mask recovery AND without a threshold-reaching
+            //     merge (FILTER_RELAX picks them), lower the in-prevalence floor,
+            //     guard the extra candidates against all-CDS, keep ONLY cross-map-
+            //     free markers, and add higher-prevalence tiers first until the
+            //     threshold is met. Rescued markers fold into the final DB. If
+            //     nothing is flagged the branch runs empty and the output equals
+            //     the base set.
+            if( params.relax_in_prevalence ) {
+                SCORE_RELAX(COUNTS.out.counts, COUNTS.out.clade_sizes)
+                FILTER_RELAX(SCORE_RELAX.out.markers,
+                             LOW_MARKER_MASKING.out.species, MERGE_GAIN.out.gain)
+                RELAX_EMIT(FILTER_RELAX.out.candidates,
+                           clusters_loose, clusters_species, reps_fna, manifest)
+                RELAX_CROSSMAP(RELAX_EMIT.out.marker_fasta, all_cds)
+                RELAX_GUARD(RELAX_CROSSMAP.out.hits, RELAX_CROSSMAP.out.idmap,
+                            RELAX_EMIT.out.markers, RELAX_EMIT.out.marker_fasta,
+                            manifest)
+                SELECT_RELAXED(SPECIFICITY.out.markers,
+                               RELAX_GUARD.out.markers, RELAX_GUARD.out.marker_fasta)
+                MERGE_RELAX(SPECIFICITY.out.markers, SPECIFICITY.out.marker_fasta,
+                            SELECT_RELAXED.out.markers, SELECT_RELAXED.out.marker_fasta)
+                markers_final = MERGE_RELAX.out.markers
+                fasta_final   = MERGE_RELAX.out.marker_fasta
+            }
         }
     } else {
         markers_final = markers_emitted
