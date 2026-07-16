@@ -200,9 +200,12 @@ workflow MARKERS {
     EMIT_DB(DIVERSITY.out.marker_table, fasta_final)
 
     // 11b. Per-species pairwise marker ANI at each filtering stage (report
-    //      boxplots). Uses the pre-QC emitted marker set so the specific-N stage
-    //      is complete; the guard verdicts split it into post-crossmap / -recovery.
-    MARKER_ANI(EMIT_REPS.out.marker_fasta, markers_emitted, spec_report)
+    //      boxplots): for each top-scoring marker, pairwise distance among its
+    //      copies across the species' genomes. Uses the pre-QC emitted marker set
+    //      so the specific-N stage is complete; the guard verdicts split it into
+    //      post-crossmap / -recovery. Copies come from the all-CDS set via the
+    //      species clusters.
+    MARKER_ANI(markers_emitted, spec_report, clusters_species, manifest, all_cds)
 
     // 12. Human-readable HTML report: the pangenome->core->marker funnel per
     //     species, why genes were removed at each QC stage, and which species

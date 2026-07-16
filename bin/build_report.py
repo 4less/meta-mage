@@ -220,21 +220,23 @@ def build_species_funnel(counts_path, species_size, species_score_sum, n_total, 
 _ANI_JS = r"""
 (function(){
   const STAGES = ANI_DATA.stages || [];
-  const H=190, PADL=42, PADR=12, PADT=20, PADB=30;
-  function yScale(v){ return PADT + (1-v)*(H-PADT-PADB); }
+  const YMAX = ANI_DATA.ymax || 0.2;
+  const H=190, PADL=48, PADR=12, PADT=20, PADB=30;
+  function yScale(v){ v=Math.min(v, YMAX); return PADT + (1 - v/YMAX)*(H-PADT-PADB); }
   function panel(boxes, title){
     const step = Math.max(6, Math.min(16, 940/Math.max(1, boxes.length)));
     const W = PADL + PADR + boxes.length*step;
     let g = '';
-    [0,0.25,0.5,0.75,1].forEach(function(v){
-      const y=yScale(v);
+    [0,0.25,0.5,0.75,1].forEach(function(f){
+      const v=f*YMAX, y=yScale(v);
       g += '<line x1="'+PADL+'" y1="'+y+'" x2="'+W+'" y2="'+y+'" stroke="var(--line)" stroke-width="1"/>';
-      g += '<text x="'+(PADL-6)+'" y="'+(y+3)+'" text-anchor="end" font-size="10" fill="var(--dim)">'+(v*100).toFixed(0)+'%</text>';
+      g += '<text x="'+(PADL-6)+'" y="'+(y+3)+'" text-anchor="end" font-size="10" fill="var(--dim)">'+v.toFixed(2)+'</text>';
     });
     boxes.forEach(function(b,i){
       const x = PADL + i*step + step/2;
       const bw = Math.max(2, step*0.6);
-      const t='<title>'+b.c+'  median '+(b.med*100).toFixed(1)+'%  max '+(b.hi*100).toFixed(1)+'%  (n='+b.n+')</title>';
+      const clip = (b.hi > YMAX) ? '  [max '+b.hi.toFixed(3)+' clipped]' : '';
+      const t='<title>'+b.c+'  median dist '+b.med.toFixed(3)+'  max '+b.hi.toFixed(3)+'  (n='+b.n+' pairs)'+clip+'</title>';
       g += '<line x1="'+x+'" y1="'+yScale(b.hi)+'" x2="'+x+'" y2="'+yScale(b.lo)+'" stroke="var(--dim)" stroke-width="1"/>';
       g += '<rect x="'+(x-bw/2)+'" y="'+yScale(b.q3)+'" width="'+bw+'" height="'+Math.max(1,(yScale(b.q1)-yScale(b.q3)))+'" fill="var(--accent)" fill-opacity="0.35" stroke="var(--accent)" stroke-width="1">'+t+'</rect>';
       g += '<line x1="'+(x-bw/2)+'" y1="'+yScale(b.med)+'" x2="'+(x+bw/2)+'" y2="'+yScale(b.med)+'" stroke="var(--accent)" stroke-width="1.5"/>';
@@ -575,13 +577,17 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
             "<option value='%s'>%s</option>" % (esc(s), esc(s)) for s in sp_keys)
         data_json = json.dumps(marker_ani).replace("</", "<\\/")
         ani_section = (
-            "<h2>Pairwise marker ANI per species</h2>"
+            "<h2>Within-species marker conservation</h2>"
             "<p class='legend'>For a species' markers, each <b>box is one marker</b>"
-            " and summarises its pairwise nucleotide identity (mash-style, "
-            "k=" + str(marker_ani.get("kmer", "?")) + ") to <b>every other marker"
-            "</b> in that stage's set. Low boxes = the marker is distinct; a high "
-            "box or tall whisker = it is redundant with (or cross-similar to) other "
-            "markers. Panels are the three filtering stages, each capped at "
+            " and summarises the pairwise <b>nucleotide distance</b> (mash-style, "
+            "k=" + str(marker_ani.get("kmer", "?")) + ") among <b>its copies across "
+            "the species' genomes</b> (up to "
+            + str(marker_ani.get("max_copies", 60)) + " genomes sampled). Low boxes"
+            " = the marker is near-identical in every genome (a good, mappable "
+            "marker); a tall box or high whisker = it is polymorphic within the "
+            "species, so reads from divergent strains may miss it. The y-axis is "
+            "distance, capped at " + str(marker_ani.get("ymax", 0.2)) + " (higher "
+            "values clipped). Panels are the three filtering stages, each capped at "
             + str(marker_ani.get("cap", 200)) + " markers ordered by score: "
             "<b>specific-200</b> (top candidates, pre-guard) &rarr; "
             "<b>post-crossmap</b> (survived the guard cleanly) &rarr; "
