@@ -10,6 +10,8 @@ process REPORT {
     path scored            // markers.tsv (SCORE selected, post-cap)
     path spec_report       // specificity_report.tsv, or the NO_FILE placeholder
     path merge_gain        // merge_gain.tsv, or the NO_FILE placeholder
+    path nakedness         // nakedness.tsv, or the NO_FILE placeholder
+    path marker_ani        // marker_ani.json (per-species pairwise marker ANI)
 
     output:
     path 'report.html', emit: report
@@ -27,6 +29,8 @@ process REPORT {
         --markers ${scored} \\
         --specificity ${spec_report} \\
         --merge_gain ${merge_gain} \\
+        --nakedness ${nakedness} \\
+        --marker_ani ${marker_ani} \\
         --min_in ${params.min_in_prevalence} \\
         --max_out ${params.max_out_prevalence} \\
         --min_clade_size ${params.min_clade_size} \\

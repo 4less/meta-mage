@@ -127,6 +127,23 @@ def load_merge_gain(path):
     return rows
 
 
+def load_nakedness(path):
+    """nakedness.tsv rows (list of dicts) or [] when absent. Classifies each
+    guard-dropped marker as 'naked' (>=1 off-target clade with no competing
+    marker -> truly steals reads) or 'contested' (every off-target clade markers
+    the region too -> the drop was conservative)."""
+    if not path or os.path.basename(path) == "NO_FILE" or not os.path.exists(path):
+        return []
+    rows = []
+    with open(path) as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        for line in fh:
+            f = line.rstrip("\n").split("\t")
+            if len(f) == len(header):
+                rows.append(dict(zip(header, f)))
+    return rows
+
+
 def load_selected(path):
     """(rank, clade, cluster) -> score for SCORE's selected (post-cap) markers."""
     selected = {}
@@ -197,6 +214,47 @@ def build_species_funnel(counts_path, species_size, species_score_sum, n_total, 
     return funnel
 
 
+# Client-side boxplot renderer (kept as a plain string so its { } braces stay
+# literal -- the surrounding page template is an f-string). One SVG panel per
+# stage; each marker is one box (identity to every other marker in the set).
+_ANI_JS = r"""
+(function(){
+  const STAGES = ANI_DATA.stages || [];
+  const H=190, PADL=42, PADR=12, PADT=20, PADB=30;
+  function yScale(v){ return PADT + (1-v)*(H-PADT-PADB); }
+  function panel(boxes, title){
+    const step = Math.max(6, Math.min(16, 940/Math.max(1, boxes.length)));
+    const W = PADL + PADR + boxes.length*step;
+    let g = '';
+    [0,0.25,0.5,0.75,1].forEach(function(v){
+      const y=yScale(v);
+      g += '<line x1="'+PADL+'" y1="'+y+'" x2="'+W+'" y2="'+y+'" stroke="var(--line)" stroke-width="1"/>';
+      g += '<text x="'+(PADL-6)+'" y="'+(y+3)+'" text-anchor="end" font-size="10" fill="var(--dim)">'+(v*100).toFixed(0)+'%</text>';
+    });
+    boxes.forEach(function(b,i){
+      const x = PADL + i*step + step/2;
+      const bw = Math.max(2, step*0.6);
+      const t='<title>'+b.c+'  median '+(b.med*100).toFixed(1)+'%  max '+(b.hi*100).toFixed(1)+'%  (n='+b.n+')</title>';
+      g += '<line x1="'+x+'" y1="'+yScale(b.hi)+'" x2="'+x+'" y2="'+yScale(b.lo)+'" stroke="var(--dim)" stroke-width="1"/>';
+      g += '<rect x="'+(x-bw/2)+'" y="'+yScale(b.q3)+'" width="'+bw+'" height="'+Math.max(1,(yScale(b.q1)-yScale(b.q3)))+'" fill="var(--accent)" fill-opacity="0.35" stroke="var(--accent)" stroke-width="1">'+t+'</rect>';
+      g += '<line x1="'+(x-bw/2)+'" y1="'+yScale(b.med)+'" x2="'+(x+bw/2)+'" y2="'+yScale(b.med)+'" stroke="var(--accent)" stroke-width="1.5"/>';
+    });
+    return '<div class="anipanel"><div class="anititle">'+title+' <span class="dim">(n='+boxes.length+' markers)</span></div>'
+      + '<div class="aniscroll"><svg width="'+W+'" height="'+H+'">'+g+'</svg></div></div>';
+  }
+  function render(sp){
+    const d = ANI_DATA.species[sp] || {};
+    let out='';
+    STAGES.forEach(function(st){ out += panel(d[st]||[], st); });
+    document.getElementById('aniPanels').innerHTML = out;
+  }
+  const sel = document.getElementById('aniSp');
+  if(sel){ sel.addEventListener('change', function(){ render(sel.value); });
+    if(sel.options.length){ render(sel.value); } }
+})();
+"""
+
+
 # ---------------------------------------------------------------------- render
 def esc(x):
     return html.escape(str(x))
@@ -220,6 +278,10 @@ def main():
     ap.add_argument("--markers", required=True, help="SCORE selected markers")
     ap.add_argument("--dropped", help="dropped_species.tsv from the prefilter")
     ap.add_argument("--specificity", help="specificity_report.tsv (or NO_FILE)")
+    ap.add_argument("--nakedness", help="nakedness.tsv (or NO_FILE) -- naked vs "
+                    "contested classification of cross-map-dropped markers")
+    ap.add_argument("--marker_ani", help="marker_ani.json (or NO_FILE) -- per-"
+                    "species pairwise marker ANI at each filtering stage")
     ap.add_argument("--merge_gain", help="merge_gain.tsv (or NO_FILE) -- merge "
                     "assessment for low-marker species")
     ap.add_argument("--min_in", type=float, required=True)
@@ -313,12 +375,33 @@ def main():
 
     merge_gain = load_merge_gain(args.merge_gain)
 
+    # ---- nakedness of guard-dropped markers, aggregated per species.
+    naked_rows = load_nakedness(args.nakedness)
+    sp_naked = defaultdict(lambda: {"contested": 0, "naked": 0})
+    for r in naked_rows:
+        if r.get("rank") != "species":
+            continue
+        v = r.get("verdict")
+        if v in ("contested", "naked"):
+            sp_naked[r["clade"]][v] += 1
+    naked_totals = {
+        "contested": sum(d["contested"] for d in sp_naked.values()),
+        "naked": sum(d["naked"] for d in sp_naked.values()),
+    }
+
+    # ---- per-species pairwise marker ANI (report boxplots), embedded verbatim.
+    marker_ani = {}
+    if (args.marker_ani and os.path.basename(args.marker_ani) != "NO_FILE"
+            and os.path.exists(args.marker_ani)):
+        with open(args.marker_ani) as fh:
+            marker_ani = json.load(fh)
+
     html_out = render_html(
         args, p, qc_ran, n_total, n_species, n_genera,
         species_size, species_genus, funnel, sp_selected, sp_final, sp_rescued,
         rank_selected, rank_final, rank_qc_dropped, rank_rescued,
         qc_removed, dropped, genus_species, genus_prefilter, genus_zero,
-        zero_marker_species, merge_gain,
+        zero_marker_species, merge_gain, sp_naked, naked_totals, marker_ani,
         totals=dict(pangenome=tot_pangenome, core=tot_core, specific=tot_specific,
                     selected=tot_selected, final=tot_final, rescued=tot_rescued),
     )
@@ -333,7 +416,8 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
                 species_size, species_genus, funnel, sp_selected, sp_final, sp_rescued,
                 rank_selected, rank_final, rank_qc_dropped, rank_rescued,
                 qc_removed, dropped, genus_species, genus_prefilter, genus_zero,
-                zero_marker_species, merge_gain, totals):
+                zero_marker_species, merge_gain, sp_naked, naked_totals,
+                marker_ani, totals):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     # Summary cards.
@@ -372,16 +456,19 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
         # so a marker that cross-mapped but was recovered is NOT counted here.
         qc_drop = max(0, sel - fin) if qc_ran else 0
         cls = " class='warn'" if fin == 0 else ""
+        # Survivor columns are plain; loss columns carry .loss (dim).
+        qc_cell = f"<td class='loss'>{qc_drop}</td>" if qc_ran else "<td class='loss'>-</td>"
         resc_cell = f"<td>{resc}</td>" if qc_ran else "<td>-</td>"
         body_rows.append(
             f"<tr{cls}><td class='l'>{esc(sp)}</td>"
             f"<td class='l dim'>{esc(species_genus.get(sp, 'NA'))}</td>"
             f"<td>{species_size.get(sp, 0)}</td>"
-            f"<td>{pan}</td><td>{core}</td>"
-            f"<td>{fn.get('non_core', 0)}</td>"
+            f"<td>{pan}</td>"
+            f"<td class='loss'>{fn.get('non_core', 0)}</td><td>{core}</td>"
+            f"<td class='loss'>{fn.get('non_specific', 0) + fn.get('below_min_in', 0)}</td>"
             f"<td>{spec}</td>"
-            f"<td>{fn.get('non_specific', 0) + fn.get('below_min_in', 0)}</td>"
-            f"<td>{capped}</td><td>{qc_drop}</td>{resc_cell}"
+            f"<td class='loss'>{capped}</td><td>{sel}</td>"
+            f"{qc_cell}{resc_cell}"
             f"<td class='strong'>{fin}</td></tr>"
         )
     trunc_note = (f"<p class='note'>Showing the first {args.max_table_rows:,} of "
@@ -432,6 +519,78 @@ def render_html(args, p, qc_ran, n_total, n_species, n_genera,
             "<th>Merged markers</th><th>&Delta;</th><th># merged</th>"
             "<th>Merge with</th><th>Trajectory</th><th>Verdict</th></tr></thead>"
             f"<tbody>{''.join(mrows)}</tbody></table></div>")
+
+    # Nakedness of cross-map drops: naked (no competing off-target marker ->
+    # truly steals reads) vs contested (off-target clade markers the region too
+    # -> the guard dropped it conservatively; a competitive rule could keep it).
+    naked_section = ""
+    if sp_naked:
+        tot_c = naked_totals["contested"]
+        tot_n = naked_totals["naked"]
+        tot = tot_c + tot_n
+        nrows = sorted(
+            sp_naked.items(),
+            key=lambda kv: (-(kv[1]["contested"] + kv[1]["naked"]),
+                            -kv[1]["contested"]),
+        )
+        nbody = []
+        for sp, d in nrows[: args.max_table_rows]:
+            drp = d["contested"] + d["naked"]
+            cls = " class='warn'" if d["contested"] and d["naked"] == 0 else ""
+            nbody.append(
+                f"<tr{cls}><td class='l'>{esc(sp)}</td>"
+                f"<td class='l dim'>{esc(species_genus.get(sp, 'NA'))}</td>"
+                f"<td>{drp}</td><td class='strong'>{d['contested']}</td>"
+                f"<td>{d['naked']}</td><td>{pct(d['naked'], drp)}</td></tr>"
+            )
+        body = "".join(nbody)
+        naked_section = (
+            "<h2>Cross-map drops: naked vs contested</h2>"
+            "<p class='legend'>The guard drops a marker whenever its sequence "
+            "occurs outside its clade. But a drop only truly costs specificity "
+            "when the off-target region has <b>no competing marker</b> on the "
+            "other side (<b>naked</b> &mdash; reads land only here, inflating the "
+            "wrong taxon). When the off-target clade markers the same region "
+            "(<b>contested</b>), reads are shared, so under a competitive "
+            "assignment rule the marker could have been kept. Contested drops are "
+            "where the conservative guard is over-dropping. Of "
+            f"<b>{tot:,}</b> classified cross-map drops, <b>{tot_c:,}</b> are "
+            f"contested (recoverable) and <b>{tot_n:,}</b> naked (correctly "
+            "dropped). Amber rows lost only contested markers.</p>"
+            "<div class='tablewrap'><table><thead><tr><th>Species</th><th>Genus</th>"
+            "<th>Cross-map dropped</th><th>Contested (recoverable)</th>"
+            "<th>Naked</th><th>% naked</th></tr></thead>"
+            f"<tbody>{body}</tbody></table></div>"
+        )
+
+    # Per-species pairwise marker ANI boxplots (one panel per filtering stage;
+    # each box = a marker's identity to every other marker in that stage's set).
+    ani_section = ""
+    if marker_ani and marker_ani.get("species"):
+        sp_data = marker_ani["species"]
+        # default + option order: most stage-1 markers first (most to look at).
+        sp_keys = sorted(sp_data,
+                         key=lambda s: -len(sp_data[s].get("specific-200", [])))
+        options = "".join(
+            "<option value='%s'>%s</option>" % (esc(s), esc(s)) for s in sp_keys)
+        data_json = json.dumps(marker_ani).replace("</", "<\\/")
+        ani_section = (
+            "<h2>Pairwise marker ANI per species</h2>"
+            "<p class='legend'>For a species' markers, each <b>box is one marker</b>"
+            " and summarises its pairwise nucleotide identity (mash-style, "
+            "k=" + str(marker_ani.get("kmer", "?")) + ") to <b>every other marker"
+            "</b> in that stage's set. Low boxes = the marker is distinct; a high "
+            "box or tall whisker = it is redundant with (or cross-similar to) other "
+            "markers. Panels are the three filtering stages, each capped at "
+            + str(marker_ani.get("cap", 200)) + " markers ordered by score: "
+            "<b>specific-200</b> (top candidates, pre-guard) &rarr; "
+            "<b>post-crossmap</b> (survived the guard cleanly) &rarr; "
+            "<b>post-recovery</b> (final, incl. mask-rescued).</p>"
+            "<div class='anictl'>Species: <select id='aniSp'>" + options
+            + "</select></div><div id='aniPanels'></div>"
+            "<script>\nconst ANI_DATA=" + data_json + ";\n" + _ANI_JS
+            + "\n</script>"
+        )
 
     # Markers-by-rank table.
     rank_body = []
@@ -668,6 +827,15 @@ th {{ position:sticky; top:0; background:var(--panel2); color:var(--dim);
   font-weight:600; font-size:12px; text-align:right; }}
 td.l, th:first-child {{ text-align:left; }}
 td.dim {{ color:var(--dim); }}
+td.loss, th.loss {{ color:var(--dim); font-weight:400;
+  background:color-mix(in srgb, var(--line) 30%, transparent); }}
+.anictl {{ margin:10px 2px; color:var(--dim); font-size:13px; }}
+.anictl select {{ background:var(--panel2); color:var(--fg);
+  border:1px solid var(--line); border-radius:6px; padding:4px 8px; font-size:13px; }}
+.anipanel {{ margin:14px 0; }}
+.anititle {{ font-size:13px; color:var(--fg); margin-bottom:2px; }}
+.aniscroll {{ overflow-x:auto; border:1px solid var(--line);
+  border-radius:8px; background:var(--panel); padding:4px 0; }}
 td.strong {{ font-weight:700; color:var(--accent); }}
 span.ok {{ color:var(--ok); font-weight:600; }}
 span.warn {{ color:var(--warn); font-weight:600; }}
@@ -702,23 +870,28 @@ th.has-tip::after {{ content:"\\00a0\\24d8"; color:var(--accent); font-size:10px
 <div class="cards">{cards}</div>
 
 <h2>Per-species marker funnel</h2>
-<p class="legend">Each stage removes gene families from the previous one:
-<b>pangenome</b> &rarr; <b>core</b> (drop: below {p['core_prevalence']:.0%} in-species
-prevalence) &rarr; <b>specific</b> (drop: shared with other clades / below marker
-prevalence) &rarr; <b>selected</b> (drop: over the {p['max_per_clade']}/clade cap)
-&rarr; <b>final</b> (drop: cross-map QC; a cross-mapping marker is rescued when
-masking leaves a clean window). <b>Final</b> includes mask-rescued markers. Rows in
-amber ended with zero markers.</p>
+<p class="legend">Bold columns are the <b>surviving marker count at each stage</b>;
+dim columns are what was <b>lost</b> to reach the next survivor count. Reading left
+to right: <b>Pan</b> &rarr; (&minus;<b>&not;Core</b>) &rarr; <b>Core</b> &rarr;
+(&minus;<b>&not;Spec</b>) &rarr; <b>Spec</b> &rarr; (&minus;<b>Cap</b>, the
+{p['max_per_clade']}/clade cap) &rarr; <b>Sel</b> &rarr; (&minus;<b>xMap&#10007;</b>
+cross-map drops, &plus;<b>Resc</b> mask-rescued) &rarr; <b>Fin</b>. So
+Fin&nbsp;=&nbsp;Sel&nbsp;&minus;&nbsp;xMap&#10007;, and Resc is the rescued subset
+already inside Fin. Hover any header for its formula. Rows in amber ended with zero
+markers.</p>
 {trunc_note}
 <div class="tablewrap"><table><thead><tr>
-<th>Species</th><th>Genus</th><th data-tip="genomes">Genomes</th>
-<th data-tip="pangenome">Pangenome</th><th data-tip="core">Core</th>
-<th data-tip="not_core">Not core</th><th data-tip="specific">Specific</th>
-<th data-tip="not_specific">Not specific</th><th data-tip="capped">Capped</th>
-<th data-tip="qc_dropped">QC dropped</th>
-<th data-tip="rescued">Mask-rescued</th>
-<th data-tip="final">Final (after mask rescue)</th></tr></thead>
+<th>Species</th><th>Genus</th><th data-tip="genomes">N</th>
+<th data-tip="pangenome">Pan</th>
+<th data-tip="not_core" class="loss">&not;Core</th><th data-tip="core">Core</th>
+<th data-tip="not_specific" class="loss">&not;Spec</th><th data-tip="specific">Spec</th>
+<th data-tip="capped" class="loss">Cap</th><th data-tip="selected">Sel</th>
+<th data-tip="qc_dropped" class="loss">xMap&#10007;</th>
+<th data-tip="rescued">Resc</th>
+<th data-tip="final">Fin</th></tr></thead>
 <tbody>{''.join(body_rows)}</tbody></table></div>
+
+{ani_section}
 
 {merge_section}
 
@@ -731,6 +904,8 @@ amber ended with zero markers.</p>
 
 <h2>Genes removed by QC (nucleotide cross-map guard)</h2>
 {qc_section}
+
+{naked_section}
 
 <h2>Removed species &mdash; per-genus breakdown</h2>
 <p class="legend">Two ways a species leaves the DB: removed before indexing for

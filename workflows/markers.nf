@@ -18,6 +18,8 @@ include { SCORE          } from '../modules/local/score.nf'
 include { EMIT_REPS      } from '../modules/local/emit_reps.nf'
 include { CROSSMAP       } from '../modules/local/crossmap.nf'
 include { SPECIFICITY    } from '../modules/local/specificity.nf'
+include { NAKEDNESS      } from '../modules/local/nakedness.nf'
+include { MARKER_ANI     } from '../modules/local/marker_ani.nf'
 include { DIVERSITY      } from '../modules/local/diversity.nf'
 include { EMIT_DB        } from '../modules/local/emit_db.nf'
 include { REPORT; LEAKAGE_REPORT } from '../modules/local/report.nf'
@@ -110,12 +112,21 @@ workflow MARKERS {
     //    an off-target clade at read-mapping identity.
     // Merge assessment for the final report; NO_FILE unless the low-marker stage runs.
     merge_gain_report = file("${projectDir}/assets/NO_FILE")
+    // Nakedness of cross-map drops; NO_FILE unless the guard runs.
+    nakedness_report = file("${projectDir}/assets/NO_FILE")
     if( params.specificity ) {
         CROSSMAP(EMIT_REPS.out.marker_fasta, all_cds)
         SPECIFICITY(CROSSMAP.out.hits, CROSSMAP.out.idmap, markers_emitted, EMIT_REPS.out.marker_fasta, manifest, all_cds)
         markers_final = SPECIFICITY.out.markers
         fasta_final   = SPECIFICITY.out.marker_fasta
         spec_report   = SPECIFICITY.out.report
+
+        // Of the markers the guard dropped, how many are NAKED (no competing
+        // off-target marker -> truly steal reads) vs CONTESTED (the off-target
+        // clade markers the region too -> conservatively dropped). Marker-vs-
+        // marker self search + classifier.
+        NAKEDNESS(EMIT_REPS.out.marker_fasta, SPECIFICITY.out.report)
+        nakedness_report = NAKEDNESS.out.nakedness
 
         // Per-species cross-map leakage report (incoming/outgoing, dropdown focus).
         LEAKAGE_REPORT(SPECIFICITY.out.report)
@@ -186,6 +197,11 @@ workflow MARKERS {
     // 11. Final classifier DB: FASTA + annotated marker table.
     EMIT_DB(DIVERSITY.out.marker_table, fasta_final)
 
+    // 11b. Per-species pairwise marker ANI at each filtering stage (report
+    //      boxplots). Uses the pre-QC emitted marker set so the specific-N stage
+    //      is complete; the guard verdicts split it into post-crossmap / -recovery.
+    MARKER_ANI(EMIT_REPS.out.marker_fasta, markers_emitted, spec_report)
+
     // 12. Human-readable HTML report: the pangenome->core->marker funnel per
     //     species, why genes were removed at each QC stage, and which species
     //     were dropped (per-genus). Reads the pipeline's own tables so the
@@ -197,6 +213,8 @@ workflow MARKERS {
         COUNTS.out.clade_sizes,
         markers_emitted,
         spec_report,
-        merge_gain_report
+        merge_gain_report,
+        nakedness_report,
+        MARKER_ANI.out.ani
     )
 }
