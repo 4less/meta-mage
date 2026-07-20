@@ -148,7 +148,7 @@ workflow MARKERS {
                 CROSSMAP.out.idmap,
                 CROSSMAP.out.hits,
                 EMIT_REPS.out.marker_fasta,
-                reps_fna
+                all_cds
             )
 
             // Dedicated cross-map masking report (per-marker rescue verdicts).
@@ -201,7 +201,8 @@ workflow MARKERS {
             if( params.relax_in_prevalence ) {
                 SCORE_RELAX(COUNTS.out.counts, COUNTS.out.clade_sizes)
                 FILTER_RELAX(SCORE_RELAX.out.markers,
-                             LOW_MARKER_MASKING.out.species, MERGE_GAIN.out.gain)
+                             LOW_MARKER_MASKING.out.species, MERGE_GAIN.out.gain,
+                             markers_emitted)
                 RELAX_EMIT(FILTER_RELAX.out.candidates,
                            clusters_loose, clusters_species, reps_fna, manifest)
                 RELAX_CROSSMAP(RELAX_EMIT.out.marker_fasta, all_cds)

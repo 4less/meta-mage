@@ -13,6 +13,7 @@ process FILTER_RELAX {
     path relaxed        // markers_relaxed.tsv (scored at the floor)
     path low_marker     // low_marker_species.tsv
     path merge_gain     // merge_gain.tsv or NO_FILE
+    path emitted        // markers.emitted.tsv (what the main run actually guarded)
 
     output:
     path 'relax_candidates.tsv', emit: candidates
@@ -23,8 +24,8 @@ process FILTER_RELAX {
         --relaxed ${relaxed} \\
         --low_marker ${low_marker} \\
         --merge_gain ${merge_gain} \\
+        --emitted ${emitted} \\
         --rank species \\
-        --min_in_start ${params.min_in_prevalence} \\
         --out relax_candidates.tsv
     """
 

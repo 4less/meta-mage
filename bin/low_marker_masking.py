@@ -10,10 +10,10 @@ partially (mask the offending slice and keep a clade-unique marker).
 
 All flagged species are processed in ONE pass over each big input (crossmap.m8,
 the target CDS, the marker FASTA), so cost is independent of how many species are
-flagged. The target defaults to reps.ffn (species-rep CDS): every off-target hit
-to a rep genome is found there, which is enough to localise the cross-mapped
-region; a marker whose hits are all to non-rep genomes is reported as
-'target_unavailable' rather than guessed.
+flagged. --target must be the SAME corpus CROSSMAP searched (all_cds.ffn): the
+off-target ids come from crossmap.m8, so a narrower target (e.g. reps.ffn) cannot
+resolve hits to non-rep genomes and silently writes them off as
+'target_unavailable'. Only the off-target hits are held in memory, not the corpus.
 
 Outputs (under --outdir):
     low_marker_species.tsv  -- species, genus, genomes, final_markers, flagged

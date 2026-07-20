@@ -86,9 +86,30 @@ def ani_strip_svg(within, between_by_sp, min_within, max_between, w=620, h=None)
                      f"text-anchor='middle'>gap {min_within-max_between:.1f}</text>")
 
     def dots(vals, y, cls):
-        for a in vals:
-            parts.append(f"<circle cx='{x(a):.1f}' cy='{y:.1f}' r='3.4' "
-                         f"class='{cls}'/>")
+        # Overlapping same-radius dots on one row are indistinguishable from
+        # their union, so emit each touching run as a single capsule instead of
+        # one <circle> per pair -- a species with g genomes has O(g^2) pairs.
+        if not vals:
+            return
+        r = 3.4
+        xs = sorted(x(a) for a in vals)
+        runs = []
+        start = prev = xs[0]
+        for xv in xs[1:]:
+            if xv - prev <= 2 * r:
+                prev = xv
+            else:
+                runs.append((start, prev))
+                start = prev = xv
+        runs.append((start, prev))
+        for x1, x2 in runs:
+            if x2 - x1 < 0.1:
+                parts.append(f"<circle cx='{x1:.1f}' cy='{y:.1f}' r='{r}' "
+                             f"class='{cls}'/>")
+            else:
+                parts.append(f"<rect x='{x1-r:.1f}' y='{y-r:.1f}' "
+                             f"width='{x2-x1+2*r:.1f}' height='{2*r:.1f}' "
+                             f"rx='{r}' class='{cls}'/>")
 
     y = pad_t + row_h * 0.7
     dots(within, y, "win")

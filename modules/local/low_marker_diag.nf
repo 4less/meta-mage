@@ -1,7 +1,7 @@
 // Diagnostics for species that ended below the marker threshold
 // (params.low_marker_threshold). Two questions per flagged species:
 //   1. can masking rescue the markers the cross-map guard dropped, or do they
-//      cross-map whole-gene? (LOW_MARKER_MASKING -> assess via reps.ffn)
+//      cross-map whole-gene? (LOW_MARKER_MASKING -> assess via all_cds.ffn)
 //   2. is the within-species ANI cleanly tighter than the between-species ANI in
 //      the genus, or do they overlap (a re-merge signal)? (ANI_GAP -> skani)
 // LOW_MARKER_REPORT folds both into one self-contained HTML page.
@@ -17,7 +17,9 @@ process LOW_MARKER_MASKING {
     path idmap           // query.map
     path hits            // crossmap.m8
     path marker_fasta    // markers.nuc.fasta (marker CDS / crossmap queries)
-    path target          // reps.ffn (species-rep CDS; fast localisation target)
+    path target          // all_cds.ffn -- MUST be the same corpus CROSSMAP searched,
+                         // or off-target hits to non-rep genomes can't be localised
+                         // and are written off as 'target_unavailable'
 
     output:
     path 'low_marker_species.tsv', emit: species
