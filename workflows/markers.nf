@@ -16,6 +16,7 @@ include { REHEADER as REHEADER_FNA } from '../modules/local/reheader.nf'
 include { COUNTS         } from '../modules/local/counts.nf'
 include { SCORE; SCORE_RELAX } from '../modules/local/score.nf'
 include { FILTER_RELAX; RELAX_EMIT; RELAX_CROSSMAP; RELAX_GUARD; SELECT_RELAXED; MERGE_RELAX } from '../modules/local/relax.nf'
+include { SELECT_CORE; CORE_EMIT; CORE_CROSSMAP; CORE_GUARD; SELECT_CORE_RESCUED; MERGE_CORE } from '../modules/local/core_rescue.nf'
 include { EMIT_REPS      } from '../modules/local/emit_reps.nf'
 include { CROSSMAP       } from '../modules/local/crossmap.nf'
 include { SPECIFICITY    } from '../modules/local/specificity.nf'
@@ -216,6 +217,31 @@ workflow MARKERS {
                 markers_final = MERGE_RELAX.out.markers
                 fasta_final   = MERGE_RELAX.out.marker_fasta
                 relaxed_report = SELECT_RELAXED.out.markers
+            }
+
+            // 9d. Core-gene mask rescue. For flagged species, drop the uniqueness
+            //     gate, cross-map EVERY core gene against all-CDS, and keep the
+            //     ones a clean window survives after masking the shared stretches
+            //     (CORE_GUARD runs the guard WITH --target, so cross-mapping is not
+            //     fatal). Recovers markers that live in the locally divergent window
+            //     of an otherwise-shared core gene -- the genes the uniqueness gate
+            //     discards. Chains onto whatever markers_final is (base or relaxed).
+            if( params.core_rescue ) {
+                SELECT_CORE(COUNTS.out.counts, COUNTS.out.clade_sizes,
+                            LOW_MARKER_MASKING.out.species, markers_emitted)
+                CORE_EMIT(SELECT_CORE.out.candidates,
+                          clusters_loose, clusters_species, reps_fna, manifest)
+                CORE_CROSSMAP(CORE_EMIT.out.marker_fasta, all_cds)
+                CORE_GUARD(CORE_CROSSMAP.out.hits, CORE_CROSSMAP.out.idmap,
+                           CORE_EMIT.out.markers, CORE_EMIT.out.marker_fasta,
+                           manifest, all_cds)
+                SELECT_CORE_RESCUED(markers_final,
+                                    CORE_GUARD.out.markers, CORE_GUARD.out.marker_fasta)
+                MERGE_CORE(markers_final, fasta_final,
+                           SELECT_CORE_RESCUED.out.markers,
+                           SELECT_CORE_RESCUED.out.marker_fasta)
+                markers_final = MERGE_CORE.out.markers
+                fasta_final   = MERGE_CORE.out.marker_fasta
             }
         }
     } else {
