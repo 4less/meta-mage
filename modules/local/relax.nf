@@ -41,7 +41,7 @@ process RELAX_EMIT {
     path markers           // relax_candidates.tsv
     path clusters_loose
     path clusters_species
-    path reps_ffn
+    path all_cds
     path manifest
 
     output:
@@ -54,7 +54,7 @@ process RELAX_EMIT {
         --markers ${markers} \\
         --clusters ${clusters_loose} \\
         --clusters_species ${clusters_species} \\
-        --reps_ffn ${reps_ffn} \\
+        --all_cds ${all_cds} \\
         --manifest ${manifest} \\
         --min_gene_len ${params.min_gene_len} \\
         --out_markers relax.emitted.tsv \\

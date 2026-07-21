@@ -6,7 +6,7 @@ process EMIT_REPS {
     path markers           // rank clade cluster ...  (cluster ids tagged L:/S:)
     path clusters_loose    // rep <TAB> member  (loose clustering)
     path clusters_species  // rep <TAB> member  (species-tight clustering)
-    path reps_ffn          // reheadered nucleotide CDS, species reps only
+    path all_cds           // reheadered nucleotide CDS for every genome
     path manifest
 
     output:
@@ -19,7 +19,7 @@ process EMIT_REPS {
         --markers ${markers} \\
         --clusters ${clusters_loose} \\
         --clusters_species ${clusters_species} \\
-        --reps_ffn ${reps_ffn} \\
+        --all_cds ${all_cds} \\
         --manifest ${manifest} \\
         --min_gene_len ${params.min_gene_len} \\
         --out_markers markers.emitted.tsv \\

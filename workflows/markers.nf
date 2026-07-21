@@ -88,17 +88,13 @@ workflow MARKERS {
     // 7. Specificity scoring across all ranks.
     SCORE(COUNTS.out.counts, COUNTS.out.clade_sizes)
 
-    // 8. Nucleotide CDS, reheadered (g<idx>_<orig>) for EVERY genome. The marker
-    //    payload is drawn from species reps only (reps_fna), but the specificity
-    //    guard needs the full corpus (all_cds) so cross-mapping is tested against
-    //    every genome, not just one representative per species.
+    // 8. Nucleotide CDS, reheadered (g<idx>_<orig>) for EVERY genome. Both the
+    //    marker payload (EMIT_REPS) and the specificity guard read the full corpus
+    //    (all_cds): EMIT_REPS draws each species' CDS from the best genome that
+    //    carries the gene (rep preferred, else highest-completeness genome), so a
+    //    marker is no longer lost when only the single rep genome is fragmentary.
     REHEADER_FNA(PYRODIGAL.out.fna)
     reheadered_fna = REHEADER_FNA.out.fasta
-
-    reps_fna = reheadered_fna
-        .filter { meta, fna -> meta.is_rep }
-        .map { meta, fna -> fna }
-        .collectFile(name: 'reps.ffn', storeDir: "${params.outdir}/emit")
 
     all_cds = reheadered_fna
         .map { meta, fna -> fna }
@@ -107,7 +103,7 @@ workflow MARKERS {
     // EMIT_REPS also drops markers whose every rep CDS is < min_gene_len and emits
     // the length-filtered marker table (markers.emitted.tsv); everything downstream
     // uses that so the QC set, the DB, and the report all agree.
-    EMIT_REPS(SCORE.out.markers, clusters_loose, clusters_species, reps_fna, manifest)
+    EMIT_REPS(SCORE.out.markers, clusters_loose, clusters_species, all_cds, manifest)
     markers_emitted = EMIT_REPS.out.markers
 
     // 9. Nucleotide specificity guard (MetaPhlAn's final uniqueness check): align
@@ -205,7 +201,7 @@ workflow MARKERS {
                              LOW_MARKER_MASKING.out.species, MERGE_GAIN.out.gain,
                              markers_emitted)
                 RELAX_EMIT(FILTER_RELAX.out.candidates,
-                           clusters_loose, clusters_species, reps_fna, manifest)
+                           clusters_loose, clusters_species, all_cds, manifest)
                 RELAX_CROSSMAP(RELAX_EMIT.out.marker_fasta, all_cds)
                 RELAX_GUARD(RELAX_CROSSMAP.out.hits, RELAX_CROSSMAP.out.idmap,
                             RELAX_EMIT.out.markers, RELAX_EMIT.out.marker_fasta,
@@ -230,7 +226,7 @@ workflow MARKERS {
                 SELECT_CORE(COUNTS.out.counts, COUNTS.out.clade_sizes,
                             LOW_MARKER_MASKING.out.species, markers_emitted)
                 CORE_EMIT(SELECT_CORE.out.candidates,
-                          clusters_loose, clusters_species, reps_fna, manifest)
+                          clusters_loose, clusters_species, all_cds, manifest)
                 CORE_CROSSMAP(CORE_EMIT.out.marker_fasta, all_cds)
                 CORE_GUARD(CORE_CROSSMAP.out.hits, CORE_CROSSMAP.out.idmap,
                            CORE_EMIT.out.markers, CORE_EMIT.out.marker_fasta,
