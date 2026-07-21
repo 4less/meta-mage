@@ -103,6 +103,34 @@ def genome_rank_key(g, idx_is_rep, idx_comp):
     return (0 if idx_is_rep.get(g, False) else 1, -idx_comp.get(g, 0.0), g)
 
 
+def select_needed(wanted, cluster_members, idx_is_rep, idx_lineage, idx_comp, k):
+    """Protein ids to actually load from all_cds: the members of the top-k best
+    genomes (rep -> completeness -> idx) per (cluster, target-clade, species).
+
+    The emit loop only ever emits from the best genome with a long-enough CDS, so
+    loading beyond the top few candidates is wasted work. It is also the difference
+    between bounded and catastrophic memory: for CORE_EMIT (which selects EVERY core
+    gene, and every genome of a species is a member of its core clusters) loading ALL
+    members pulls essentially the whole of all_cds into RAM and OOM-kills the task
+    (exit 137). Capping to k candidates bounds peak memory to ~k x the output."""
+    needed = set()
+    for cluster, targets in wanted.items():
+        members = cluster_members.get(cluster, [])
+        for rank, clade in targets:
+            by_species = {}
+            for m in members:
+                g = genome_idx(m)
+                if idx_lineage[g][rank] != clade:
+                    continue
+                sp = idx_lineage[g]["species"]
+                by_species.setdefault(sp, {}).setdefault(g, []).append(m)
+            for genomes in by_species.values():
+                for g in sorted(genomes, key=lambda x: genome_rank_key(
+                        x, idx_is_rep, idx_comp))[:k]:
+                    needed.update(genomes[g])
+    return needed
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--markers", required=True)
@@ -119,6 +147,11 @@ def main():
                          "with no sequence >= min_gene_len (keeps the DB consistent)")
     ap.add_argument("--min_gene_len", type=int, default=0,
                     help="drop marker CDS shorter than this many bp (0 = off)")
+    ap.add_argument("--max_candidates", type=int, default=2,
+                    help="genomes per species per marker to load as CDS candidates, "
+                         "best-first (rep -> completeness); the first with a long-"
+                         "enough CDS is emitted. Bounds peak memory; >1 gives a "
+                         "length-truncation fallback to the next-best genome.")
     args = ap.parse_args()
 
     idx_is_rep, idx_gid, idx_lineage, idx_comp = load_manifest(args.manifest)
@@ -130,10 +163,11 @@ def main():
     collect_members(args.clusters, "L", cluster_members)
     collect_members(args.clusters_species, "S", cluster_members)
 
-    # Pull only the member sequences of selected clusters out of all_cds.
-    needed = set()
-    for members in cluster_members.values():
-        needed.update(members)
+    # Load only the sequences the emit loop can actually use: the top-k candidate
+    # genomes per species per marker (NOT every member -- see select_needed, or
+    # CORE_EMIT OOM-kills loading all of all_cds).
+    needed = select_needed(wanted, cluster_members, idx_is_rep, idx_lineage,
+                           idx_comp, args.max_candidates)
     seqs = load_seqs_subset(args.all_cds, needed)
 
     written = 0
