@@ -20,7 +20,7 @@ include { SELECT_CORE; CORE_EMIT; CORE_CROSSMAP; CORE_GUARD; SELECT_CORE_RESCUED
 include { EMIT_REPS      } from '../modules/local/emit_reps.nf'
 include { CROSSMAP       } from '../modules/local/crossmap.nf'
 include { SPECIFICITY    } from '../modules/local/specificity.nf'
-include { NAKEDNESS_SEARCH; NAKEDNESS } from '../modules/local/nakedness.nf'
+include { NAKEDNESS_SEARCH; NAKEDNESS; NAKEDNESS_SELECT; MERGE_NAKEDNESS } from '../modules/local/nakedness.nf'
 include { MARKER_ANI     } from '../modules/local/marker_ani.nf'
 include { DIVERSITY      } from '../modules/local/diversity.nf'
 include { EMIT_DB        } from '../modules/local/emit_db.nf'
@@ -122,14 +122,34 @@ workflow MARKERS {
         fasta_final   = SPECIFICITY.out.marker_fasta
         spec_report   = SPECIFICITY.out.report
 
-        // Of the markers the guard dropped, how many are NAKED (no competing
-        // off-target marker -> truly steal reads) vs CONTESTED (the off-target
-        // clade markers the region too -> conservatively dropped). Marker-vs-
-        // marker self search + classifier.
+        // Of the markers the guard dropped, which are NAKED (off-target region maps
+        // BETTER to this marker than to the off-target clade's own competing marker
+        // -> truly steal reads) vs CONTESTED (a competitor matches >= as well -> a
+        // best-hit classifier keeps the reads home). Marker-vs-marker self search
+        // (competitor id) compared against the crossmap hits (off-target id).
         NAKEDNESS_SEARCH(EMIT_REPS.out.marker_fasta)
         NAKEDNESS(NAKEDNESS_SEARCH.out.hits, NAKEDNESS_SEARCH.out.idmap,
+                  CROSSMAP.out.hits, CROSSMAP.out.idmap, manifest,
                   SPECIFICITY.out.report)
         nakedness_report = NAKEDNESS.out.nakedness
+
+        // Competitive rescue: re-admit the CONTESTED markers (safe under a best-hit
+        // classifier) onto the guard survivors, BEFORE the low-marker diagnostics --
+        // so a contested-heavy species (e.g. sister-overlap taxa) may no longer trip
+        // the threshold and won't burn the relax/core rescue paths. Default off.
+        if( params.competitive_rescue ) {
+            NAKEDNESS_SELECT(NAKEDNESS.out.nakedness, markers_emitted,
+                             EMIT_REPS.out.marker_fasta)
+            MERGE_NAKEDNESS(SPECIFICITY.out.markers, SPECIFICITY.out.marker_fasta,
+                            NAKEDNESS_SELECT.out.markers, NAKEDNESS_SELECT.out.marker_fasta)
+            base_markers  = MERGE_NAKEDNESS.out.markers
+            base_fasta    = MERGE_NAKEDNESS.out.marker_fasta
+            markers_final = base_markers
+            fasta_final   = base_fasta
+        } else {
+            base_markers = SPECIFICITY.out.markers
+            base_fasta   = SPECIFICITY.out.marker_fasta
+        }
 
         // Per-species cross-map leakage report (incoming/outgoing, dropdown focus).
         LEAKAGE_REPORT(SPECIFICITY.out.report)
@@ -140,7 +160,7 @@ workflow MARKERS {
         if( params.low_marker_threshold > 0 ) {
             LOW_MARKER_MASKING(
                 manifest,
-                SPECIFICITY.out.markers,
+                base_markers,
                 SPECIFICITY.out.report,
                 CROSSMAP.out.idmap,
                 CROSSMAP.out.hits,
@@ -206,9 +226,9 @@ workflow MARKERS {
                 RELAX_GUARD(RELAX_CROSSMAP.out.hits, RELAX_CROSSMAP.out.idmap,
                             RELAX_EMIT.out.markers, RELAX_EMIT.out.marker_fasta,
                             manifest)
-                SELECT_RELAXED(SPECIFICITY.out.markers,
+                SELECT_RELAXED(base_markers,
                                RELAX_GUARD.out.markers, RELAX_GUARD.out.marker_fasta)
-                MERGE_RELAX(SPECIFICITY.out.markers, SPECIFICITY.out.marker_fasta,
+                MERGE_RELAX(base_markers, base_fasta,
                             SELECT_RELAXED.out.markers, SELECT_RELAXED.out.marker_fasta)
                 markers_final = MERGE_RELAX.out.markers
                 fasta_final   = MERGE_RELAX.out.marker_fasta

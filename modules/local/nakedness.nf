@@ -62,19 +62,27 @@ process NAKEDNESS {
     input:
     path self_hits      // self.m8 (marker-vs-marker mmseqs hits)
     path self_map       // self.map (m<N> -> rank|clade|cluster|genome)
-    path spec_report    // specificity_report.tsv (needs offtarget_clades column)
+    path cross_hits     // crossmap.m8 (marker-vs-all_cds hits)
+    path cross_map      // query.map (m<N> -> rank|clade|cluster|genome)
+    path manifest       // idx -> lineage (off-target genome clade lookup)
+    path spec_report    // specificity_report.tsv (pass column marks guard-dropped)
 
     output:
     path 'nakedness.tsv', emit: nakedness
 
     script:
-    // Of the markers the guard dropped, how many are NAKED (no competing off-
-    // target marker -> truly steal reads) vs CONTESTED (the off-target clade
-    // markers the region too -> conservatively dropped)?
+    // Of the markers the guard dropped, which are NAKED (off-target region maps
+    // BETTER to this marker than to the off-target clade's own competing marker ->
+    // truly steals reads) vs CONTESTED (a competitor matches >= as well -> reads
+    // stay home, drop was conservative)? Compares crossmap id_off vs self-search
+    // id_comp per off-target clade.
     """
     nakedness.py \\
         --self_hits ${self_hits} \\
         --selfmap ${self_map} \\
+        --cross_hits ${cross_hits} \\
+        --crossmap ${cross_map} \\
+        --manifest ${manifest} \\
         --specificity ${spec_report} \\
         --min_id ${params.specificity_min_id} \\
         --min_aln ${params.specificity_min_aln} \\
@@ -85,4 +93,65 @@ process NAKEDNESS {
     """
     printf 'rank\\tclade\\tcluster\\tn_offtarget_clades\\tn_contested\\tn_naked\\tverdict\\tnaked_clades\\n' > nakedness.tsv
     """
+}
+
+
+// Competitive rescue: re-admit the guard-dropped markers NAKEDNESS labelled
+// CONTESTED (every off-target clade has an >= competing marker). Their rows and
+// sequences are pulled from the PRE-guard emitted set (the guard removed them from
+// markers.specific.*), then MERGE_NAKEDNESS unions them onto the guard survivors.
+process NAKEDNESS_SELECT {
+    tag "nakedness_select"
+    publishDir "${params.outdir}/markers", mode: 'copy'
+
+    input:
+    path nakedness      // nakedness.tsv (verdict column)
+    path emitted        // markers.emitted.tsv (pre-guard marker table)
+    path emitted_fasta  // markers.nuc.fasta (pre-guard sequences)
+
+    output:
+    path 'contested.markers.tsv', emit: markers
+    path 'contested.fasta',       emit: marker_fasta
+
+    script:
+    def rank_arg = params.competitive_rescue_rank ? "--rank ${params.competitive_rescue_rank}" : ''
+    """
+    select_contested.py \\
+        --nakedness ${nakedness} \\
+        --markers ${emitted} \\
+        --fasta ${emitted_fasta} \\
+        ${rank_arg} \\
+        --out_markers contested.markers.tsv \\
+        --out_fasta contested.fasta
+    """
+
+    stub:
+    "touch contested.markers.tsv contested.fasta"
+}
+
+
+process MERGE_NAKEDNESS {
+    tag "merge_nakedness"
+    publishDir "${params.outdir}/markers", mode: 'copy'
+
+    input:
+    path base_markers    // markers.specific.tsv (guard survivors)
+    path base_fasta      // markers.specific.fasta
+    path rescued_markers // contested.markers.tsv
+    path rescued_fasta   // contested.fasta
+
+    output:
+    path 'markers.compet.tsv',   emit: markers
+    path 'markers.compet.fasta', emit: marker_fasta
+
+    script:
+    // base already has the header; append the rescued rows (skip their header).
+    """
+    cp ${base_markers} markers.compet.tsv
+    tail -n +2 ${rescued_markers} >> markers.compet.tsv
+    cat ${base_fasta} ${rescued_fasta} > markers.compet.fasta
+    """
+
+    stub:
+    "touch markers.compet.tsv markers.compet.fasta"
 }
